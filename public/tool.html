@@ -358,17 +358,25 @@ function showSbLogin() {
 
 async function sbLogin() {
   if (!_sb) { showToast('Supabase no disponible', 'error'); return; }
-  const email = document.getElementById('sb-email')?.value;
-  const pass = document.getElementById('sb-pass')?.value;
-  if (!email || !pass) { showToast('Ingresa email y contrasena', 'warning'); return; }
-  const { data, error } = await _sb.auth.signInWithPassword({ email, password: pass });
-  if (error) { showToast('Error: ' + error.message, 'error'); return; }
-  _sbUser = data.user;
-  document.getElementById('_sb_ov')?.remove();
-  toggleSbForm();
-  showToast('Conectado como ' + email, 'success');
-  renderSupabaseStatus(true);
-  await syncLocalHistoryToCloud();
+  var emailEl = document.getElementById('sb-email');
+  var passEl = document.getElementById('sb-pass');
+  var email = emailEl ? emailEl.value.trim() : '';
+  var pass = passEl ? passEl.value : '';
+  if (!email || !pass) { showToast('Ingresa tu email y contrasena', 'warning'); return; }
+  showToast('Conectando...', 'info', 2000);
+  try {
+    var res = await _sb.auth.signInWithPassword({ email: email, password: pass });
+    if (res.error) { showToast('Error: ' + res.error.message, 'error'); return; }
+    _sbUser = res.data.user;
+    document.getElementById('_sb_ov') && document.getElementById('_sb_ov').remove();
+    var sbForm = document.getElementById('sb-form');
+    if (sbForm) sbForm.style.display = 'none';
+    showToast('Conectado como ' + email, 'success', 4000);
+    renderSupabaseStatus(true);
+    await syncLocalHistoryToCloud();
+  } catch(e) {
+    showToast('Error de conexion: ' + e.message, 'error');
+  }
 }
 
 async function sbLogout() {
