@@ -42,6 +42,13 @@ input:focus, select:focus { border-color: #888; }
 .section-label { font-size: 11px; font-weight: 700; color: #999; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 8px; }
 .spinner { display: inline-block; width: 13px; height: 13px; border: 2px solid #ddd; border-top-color: #333; border-radius: 50%; animation: spin 0.7s linear infinite; vertical-align: middle; margin-right: 5px; }
 @keyframes spin { to { transform: rotate(360deg); } }
+/* Mobile touch fixes */
+button { touch-action: manipulation; -webkit-tap-highlight-color: transparent; cursor: pointer; }
+input { touch-action: manipulation; -webkit-tap-highlight-color: transparent; }
+.tab { touch-action: manipulation; -webkit-tap-highlight-color: transparent; min-height: 44px; }
+.btn-sec { touch-action: manipulation; min-height: 44px; }
+.league-btn { touch-action: manipulation; min-height: 44px; }
+.fixture-card { touch-action: manipulation; }
 @media (prefers-color-scheme: dark) {
   body { background:#181818; color:#e0e0e0; }
   .card,.match-slot,.combo-card { background:#242424; border-color:#333; }
@@ -128,7 +135,7 @@ input[type=range] { flex: 1; accent-color: #1a1a1a; height: 4px; }
       <div style="margin-bottom:10px;"><label>URL del proxy</label><input type="text" id="proxy-url" value="https://api-football-proxy-rwd8.onrender.com"></div>
       
       <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
-        <button class="btn-sec" onclick="testProxy()">Verificar conexión</button>
+        <button class="btn-sec" onclick="testProxy()" style="min-height:44px;padding:10px 20px;font-size:14px;">Verificar conexion</button>
         <span id="proxy-status"></span>
       </div>
     </div>
@@ -136,8 +143,8 @@ input[type=range] { flex: 1; accent-color: #1a1a1a; height: 4px; }
       <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:0;" id="sb-status-row">
         <div id="sb-status"><span style="font-size:12px;color:#854F0B;">Nube: no conectada</span></div>
         <div style="display:flex;gap:6px;">
-          <button onclick="toggleSbForm()" class="btn-sec" style="font-size:12px;padding:5px 10px;">Conectar</button>
-          <button onclick="syncLocalHistoryToCloud()" class="btn-sec" style="font-size:12px;padding:5px 10px;">Sincronizar</button>
+          <button onclick="toggleSbForm()" class="btn-sec" style="font-size:13px;padding:10px 16px;min-height:44px;">Conectar</button>
+          <button onclick="syncLocalHistoryToCloud()" class="btn-sec" style="font-size:13px;padding:10px 16px;min-height:44px;">Sincronizar</button>
         </div>
       </div>
       <div id="sb-form" style="display:none;margin-top:10px;border-top:1px solid #f0f0f0;padding-top:10px;">
@@ -339,22 +346,9 @@ function toggleSbForm() {
 }
 
 function showSbLogin() {
-  const ov = document.createElement('div');
-  ov.id = '_sb_ov';
-  ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:100000;display:flex;align-items:center;justify-content:center;';
-  const box = document.createElement('div');
-  box.style.cssText = 'background:#fff;border-radius:14px;padding:1.5rem;max-width:320px;width:90%;box-shadow:0 8px 32px rgba(0,0,0,.18);';
-  box.innerHTML = '<p style="font-size:15px;font-weight:500;color:#1a1a1a;margin-bottom:1rem;">Conectar cuenta</p>'
-    + '<input id="sb-email" type="email" placeholder="tu@email.com" style="width:100%;border:1px solid #ddd;border-radius:8px;padding:8px 10px;font-size:13px;margin-bottom:8px;box-sizing:border-box;">'
-    + '<input id="sb-pass" type="password" placeholder="Contrasena" style="width:100%;border:1px solid #ddd;border-radius:8px;padding:8px 10px;font-size:13px;margin-bottom:12px;box-sizing:border-box;">'
-    + '<div style="display:flex;gap:8px;">'
-    + '<button onclick="document.getElementById('_sb_ov').remove()" style="flex:1;background:#f5f5f0;border:1px solid #ddd;border-radius:8px;padding:8px;font-size:13px;cursor:pointer;">Cancelar</button>'
-    + '<button onclick="sbLogin()" style="flex:1;background:#1a1a1a;color:#fff;border:none;border-radius:8px;padding:8px;font-size:13px;cursor:pointer;">Entrar</button>'
-    + '</div>'
-    + '<p style="font-size:11px;color:#999;margin-top:8px;text-align:center;">Mismo email del dashboard web</p>';
-  ov.appendChild(box);
-  document.body.appendChild(ov);
+  toggleSbForm();
 }
+
 
 async function sbLogin() {
   if (!_sb) { showToast('Supabase no disponible', 'error'); return; }
