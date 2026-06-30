@@ -362,6 +362,10 @@ async function sbLogin() {
     var res = await _sb.auth.signInWithPassword({ email: email, password: pass });
     if (res.error) { showToast('Error: ' + res.error.message, 'error'); return; }
     _sbUser = res.data.user;
+    // Recreate client with session to ensure auth token is included in all requests
+    _sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY, {
+      global: { headers: { Authorization: 'Bearer ' + res.data.session.access_token } }
+    });
     document.getElementById('_sb_ov') && document.getElementById('_sb_ov').remove();
     var sbForm = document.getElementById('sb-form');
     if (sbForm) sbForm.style.display = 'none';
