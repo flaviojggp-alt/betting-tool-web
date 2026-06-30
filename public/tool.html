@@ -104,6 +104,7 @@ input[type=range] { flex: 1; accent-color: #1a1a1a; height: 4px; }
 .tier-low { background: #EAF3DE; color: #3B6D11; }
 .tier-unknown { background: #f0f0f0; color: #666; }
 </style>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
 </head>
 <body>
 <div class="container">
@@ -131,7 +132,11 @@ input[type=range] { flex: 1; accent-color: #1a1a1a; height: 4px; }
         <span id="proxy-status"></span>
       </div>
     </div>
-    <div class="warning">AVISO: Esta herramienta es de análisis estadístico. Las apuestas deportivas conllevan riesgo — juega con responsabilidad.</div>
+    <div style="background:#fff;border:1px solid #e5e5e5;border-radius:12px;padding:12px 16px;margin-bottom:10px;display:flex;align-items:center;justify-content:space-between;gap:8px;">
+      <div id="sb-status"><span style="font-size:12px;color:#854F0B;cursor:pointer;" onclick="showSbLogin()">Nube: no conectada — toca para conectar</span></div>
+      <button onclick="syncLocalHistoryToCloud()" class="btn-sec" style="font-size:12px;padding:5px 10px;white-space:nowrap;">Sincronizar</button>
+    </div>
+    <div class="warning">AVISO: Esta herramienta es de analisis estadistico. Las apuestas deportivas conllevan riesgo — juega con responsabilidad.</div>
   </div>
 
   <!-- SELECTOR DE PARTIDOS -->
@@ -286,6 +291,117 @@ const get = async function(path) {
 };
 
 
+// ── SUPABASE AUTH + SYNC ────────────────────────────────────────────────────
+const SUPABASE_URL = 'https://ulxmccvigmipmdjfbfek.supabase.co';
+const SUPABASE_KEY = 'sb_publishable_IJh93TEu-bxpsTaRprIy4Q_6YjTY-8i';
+let _sb = null;
+try { _sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY); } catch(e) {}
+let _sbUser = null;
+
+async function initSupabase() {
+  renderSupabaseStatus(false); // show banner immediately
+  if (!_sb) return;
+  try {
+    const { data } = await _sb.auth.getSession();
+    _sbUser = data.session?.user || null;
+    renderSupabaseStatus(_sbUser !== null);
+    if (_sbUser) showToast('Nube: conectado como ' + _sbUser.email, 'success', 3000);
+  } catch(e) {
+    renderSupabaseStatus(false);
+    console.warn('Supabase init failed:', e.message);
+  }
+}
+
+function renderSupabaseStatus(loggedIn) {
+  const el = document.getElementById('sb-status');
+  if (!el) return;
+  el.innerHTML = loggedIn
+    ? '<span style="color:#3B6D11;font-size:12px;">Nube conectada <button onclick="sbLogout()" style="background:none;border:none;color:#A32D2D;cursor:pointer;font-size:11px;margin-left:4px;">Salir</button></span>'
+    : '<span style="font-size:12px;color:#854F0B;cursor:pointer;" onclick="showSbLogin()">Nube: no conectada (clic para conectar)</span>';
+}
+
+function showSbLogin() {
+  const ov = document.createElement('div');
+  ov.id = '_sb_ov';
+  ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:100000;display:flex;align-items:center;justify-content:center;';
+  const box = document.createElement('div');
+  box.style.cssText = 'background:#fff;border-radius:14px;padding:1.5rem;max-width:320px;width:90%;box-shadow:0 8px 32px rgba(0,0,0,.18);';
+  box.innerHTML = '<p style="font-size:15px;font-weight:500;color:#1a1a1a;margin-bottom:1rem;">Conectar cuenta</p>'
+    + '<input id="sb-email" type="email" placeholder="tu@email.com" style="width:100%;border:1px solid #ddd;border-radius:8px;padding:8px 10px;font-size:13px;margin-bottom:8px;box-sizing:border-box;">'
+    + '<input id="sb-pass" type="password" placeholder="Contrasena" style="width:100%;border:1px solid #ddd;border-radius:8px;padding:8px 10px;font-size:13px;margin-bottom:12px;box-sizing:border-box;">'
+    + '<div style="display:flex;gap:8px;">'
+    + '<button onclick="document.getElementById('_sb_ov').remove()" style="flex:1;background:#f5f5f0;border:1px solid #ddd;border-radius:8px;padding:8px;font-size:13px;cursor:pointer;">Cancelar</button>'
+    + '<button onclick="sbLogin()" style="flex:1;background:#1a1a1a;color:#fff;border:none;border-radius:8px;padding:8px;font-size:13px;cursor:pointer;">Entrar</button>'
+    + '</div>'
+    + '<p style="font-size:11px;color:#999;margin-top:8px;text-align:center;">Mismo email del dashboard web</p>';
+  ov.appendChild(box);
+  document.body.appendChild(ov);
+}
+
+async function sbLogin() {
+  if (!_sb) { showToast('Supabase no disponible', 'error'); return; }
+  const email = document.getElementById('sb-email')?.value;
+  const pass = document.getElementById('sb-pass')?.value;
+  if (!email || !pass) { showToast('Ingresa email y contrasena', 'warning'); return; }
+  const { data, error } = await _sb.auth.signInWithPassword({ email, password: pass });
+  if (error) { showToast('Error: ' + error.message, 'error'); return; }
+  _sbUser = data.user;
+  document.getElementById('_sb_ov')?.remove();
+  showToast('Conectado como ' + email, 'success');
+  renderSupabaseStatus(true);
+  await syncLocalHistoryToCloud();
+}
+
+async function sbLogout() {
+  if (_sb) await _sb.auth.signOut();
+  _sbUser = null;
+  renderSupabaseStatus(false);
+  showToast('Sesion cerrada', 'info');
+}
+
+async function saveBetToCloud(bet) {
+  if (!_sb || !_sbUser) return;
+  try {
+    await _sb.from('bets').insert({
+      user_id: _sbUser.id,
+      match: bet.match || '',
+      market: bet.market || '',
+      odds: parseFloat(bet.odds) || 1,
+      confidence: parseFloat(bet.confidence) || 0,
+      amount: parseFloat(bet.amount) || 0,
+      result: bet.result || 'pending',
+      created_at: bet.date || new Date().toISOString(),
+    });
+  } catch(e) { console.warn('Cloud save failed:', e.message); }
+}
+
+async function updateBetInCloud(localId, result, closingOdds) {
+  if (!_sb || !_sbUser) return;
+  try {
+    const h = getHistory();
+    const bet = h.find(function(b){ return b.id == localId; });
+    if (!bet) return;
+    await _sb.from('bets')
+      .update({ result: result, settled_at: new Date().toISOString(), closing_odds: closingOdds || null })
+      .eq('user_id', _sbUser.id)
+      .eq('match', bet.match)
+      .eq('market', bet.market)
+      .eq('result', 'pending');
+  } catch(e) { console.warn('Cloud update failed:', e.message); }
+}
+
+async function syncLocalHistoryToCloud() {
+  if (!_sb || !_sbUser) return;
+  const h = getHistory();
+  if (!h.length) { showToast('No hay apuestas locales para sincronizar', 'info'); return; }
+  let synced = 0;
+  for (const bet of h) {
+    await saveBetToCloud(bet);
+    synced++;
+  }
+  showToast(synced + ' apuesta(s) sincronizadas con la nube', 'success', 4000);
+}
+
 // ── NOTIFICATIONS ─────────────────────────────────────────────────────────
 function showToast(msg, type, ms) {
   if (!type) type = 'info';
@@ -346,12 +462,15 @@ function getHistory(){ try{ return JSON.parse(localStorage.getItem(HISTORY_KEY)|
 function saveHistory(h){ try{ localStorage.setItem(HISTORY_KEY, JSON.stringify(h.slice(-200))); }catch(e){} }
 function recordBet(bet, sharedId){
   const h = getHistory();
-  h.push({ id: sharedId||Date.now(), date: new Date().toISOString(), match: bet.match, market: bet.market, odds: bet.odds, confidence: bet.confidence, result: 'pending' });
+  const entry = { id: sharedId||Date.now(), date: new Date().toISOString(), match: bet.match, market: bet.market, odds: bet.odds, confidence: bet.confidence, amount: bet.amount||0, result: 'pending' };
+  h.push(entry);
   saveHistory(h);
+  saveBetToCloud(entry);
 }
-function updateBetResult(id, result){ // result: 'win' | 'loss'
+function updateBetResult(id, result, closingOdds){ // result: 'win' | 'loss'
   const h = getHistory().map(b => b.id===id ? {...b, result} : b);
   saveHistory(h);
+  updateBetInCloud(id, result, closingOdds||null);
 }
 function getStats(){
   const h = getHistory().filter(b=>b.result!=='pending');
@@ -2918,6 +3037,7 @@ document.addEventListener('DOMContentLoaded', function() {
   try { tab = sessionStorage.getItem('_tab') || 'config'; } catch(e) {}
   switchTab(tab);
   setTimeout(showDailySummary, 900);
+  setTimeout(initSupabase, 500);
 });
 </script>
 </body>
