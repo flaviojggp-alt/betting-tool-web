@@ -42,6 +42,19 @@ input:focus, select:focus { border-color: #888; }
 .section-label { font-size: 11px; font-weight: 700; color: #999; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 8px; }
 .spinner { display: inline-block; width: 13px; height: 13px; border: 2px solid #ddd; border-top-color: #333; border-radius: 50%; animation: spin 0.7s linear infinite; vertical-align: middle; margin-right: 5px; }
 @keyframes spin { to { transform: rotate(360deg); } }
+/* Mobile responsive */
+@media (max-width: 600px) {
+  .odds-table { display: block; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  .lineup-col { min-width: 120px; }
+  .h2h-panel { overflow-x: auto; }
+  .tab-bar { overflow-x: auto; -webkit-overflow-scrolling: touch; white-space: nowrap; padding-bottom: 4px; }
+  .tab { font-size: 12px; padding: 6px 10px; }
+  .combo-card { padding: 10px 12px; }
+  .metric-card { padding: 8px 10px; }
+  .fixture-card { padding: 8px 10px; }
+  input[type=text], input[type=number] { font-size: 16px; }
+  .kelly-panel { overflow-x: auto; }
+}
 /* Mobile touch fixes */
 button { touch-action: manipulation; -webkit-tap-highlight-color: transparent; cursor: pointer; }
 input { touch-action: manipulation; -webkit-tap-highlight-color: transparent; }
@@ -204,6 +217,14 @@ input[type=range] { flex: 1; accent-color: #1a1a1a; height: 4px; }
   <div style="font-size:11px;color:#999;margin-top:4px;">Las jugadas individuales siempre se muestran sin importar la cuota</div>
 </div>
 <button class="btn-primary" onclick="runAnalysis()" id="btn-analyze">Analizar combinaciones</button>
+  <div id="analysis-progress-wrap" style="display:none;background:#f5f5f0;border-radius:8px;padding:8px 12px;margin-top:8px;">
+    <div style="display:flex;justify-content:space-between;margin-bottom:4px;">
+      <span id="analysis-progress-label" style="font-size:12px;color:#555;">Iniciando...</span>
+    </div>
+    <div style="background:#e5e5e5;border-radius:4px;height:6px;overflow:hidden;">
+      <div id="analysis-progress-bar" style="height:100%;background:#1a1a1a;border-radius:4px;width:0%;transition:width 0.3s ease;"></div>
+    </div>
+  </div>
   </div>
 
   <!-- RESULTADOS -->
@@ -226,6 +247,15 @@ input[type=range] { flex: 1; accent-color: #1a1a1a; height: 4px; }
 
   <div id="tab-results" style="display:none;">
     <div id="metrics-row" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:8px;margin-bottom:1rem;"></div>
+    <div style="background:var(--surface-1,#f5f5f0);border-radius:8px;padding:10px 14px;margin-bottom:10px;display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
+      <span style="font-size:12px;color:#555;white-space:nowrap;">EV minimo:</span>
+      <input type="range" id="ev-filter" min="-10" max="20" value="0" step="1" style="flex:1;min-width:120px;" oninput="document.getElementById('ev-filter-val').textContent=this.value+'%';filterByEV()">
+      <span id="ev-filter-val" style="font-size:12px;font-weight:500;min-width:36px;">0%</span>
+      <span style="font-size:12px;color:#888;">|</span>
+      <span style="font-size:12px;color:#555;white-space:nowrap;">Confianza min:</span>
+      <input type="range" id="conf-filter" min="50" max="85" value="60" step="5" style="flex:1;min-width:120px;" oninput="document.getElementById('conf-filter-val').textContent=this.value+'%';filterByEV()">
+      <span id="conf-filter-val" style="font-size:12px;font-weight:500;min-width:36px;">60%</span>
+    </div>
     <p class="section-label">Combinaciones sugeridas</p>
     <div id="combos-out"></div>
     <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap;"><button class="btn-sec" onclick="switchTab('select')">Volver a partidos</button><button class="btn-sec" onclick="exportResults()">Exportar .txt</button></div>
@@ -307,11 +337,13 @@ function switchTab(t) {
 const _apiCache = {};
 const get = async function(path) {
   const now = Date.now();
-  if (_apiCache[path] && now - _apiCache[path].ts < 300000) return _apiCache[path].data;
+  const today = new Date().toDateString();
+  const cached = _apiCache[path];
+  if (cached && (now - cached.ts < 300000) && cached.date === today) return cached.data;
   const r = await fetch(PROXY() + path);
   if (!r.ok) throw new Error('HTTP ' + r.status);
   const data = await r.json();
-  _apiCache[path] = { data: data, ts: now };
+  _apiCache[path] = { data: data, ts: now, date: today };
   return data;
 };
 
@@ -429,15 +461,32 @@ async function saveBetToCloud(bet) {
 async function updateBetInCloud(localId, result, closingOdds) {
   if (!_sb || !_sbUser) return;
   try {
+    const { data: sessionData } = await _sb.auth.getSession();
+    const token = sessionData?.session?.access_token;
+    if (!token) return;
     const h = getHistory();
     const bet = h.find(function(b){ return b.id == localId; });
     if (!bet) return;
-    await _sb.from('bets')
-      .update({ result: result, settled_at: new Date().toISOString(), closing_odds: closingOdds || null })
-      .eq('user_id', _sbUser.id)
-      .eq('match', bet.match)
-      .eq('market', bet.market)
-      .eq('result', 'pending');
+    const encodedMatch = encodeURIComponent(bet.match);
+    const encodedMarket = encodeURIComponent(bet.market);
+    const res = await fetch(
+      SUPABASE_URL + '/rest/v1/bets?user_id=eq.' + _sbUser.id + '&match=eq.' + encodedMatch + '&market=eq.' + encodedMarket + '&result=eq.pending',
+      {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+          'apikey': SUPABASE_KEY,
+          'Authorization': 'Bearer ' + token,
+          'Prefer': 'return=minimal'
+        },
+        body: JSON.stringify({
+          result: result,
+          settled_at: new Date().toISOString(),
+          closing_odds: closingOdds || null
+        })
+      }
+    );
+    if (!res.ok) console.warn('Cloud update failed:', res.status);
   } catch(e) { console.warn('Cloud update failed:', e.message); }
 }
 
@@ -596,6 +645,8 @@ async function testProxy() {
   }
 }
 
+var _leagueFixtures = {};
+
 function renderLeaguePicker() {
   const c=document.getElementById('league-picker'); c.innerHTML='';
 
@@ -686,7 +737,8 @@ async function loadFixtures(league) {
         const isLive=['1H','2H','HT','ET','BT','P'].includes(f.status?.short);
         const isAdded=matches.some(m=>m.fixtureId===f.fixtureId);
         const time=new Date(f.date).toLocaleTimeString('es',{hour:'2-digit',minute:'2-digit'});
-        html+=`<div class="fixture-card${isAdded?' added':''}" onclick="toggleFixture(${JSON.stringify(f).replace(/"/g,'&quot;')}, '${league.key}')">
+        _leagueFixtures[f.fixtureId] = f;
+        html+=`<div class="fixture-card${isAdded?' added':''}" onclick="toggleFixture(_leagueFixtures[${f.fixtureId}], '${league.key}')">
           ${f.home.logo?`<img src="${f.home.logo}" class="team-logo">`:''}
           <div style="flex:1;">
             <div style="display:flex;align-items:center;gap:4px;">
@@ -1460,6 +1512,7 @@ function buildDefPanel(m){
       <thead><tr style="background:#eee;">
         <th style="padding:4px 6px;text-align:left;font-size:11px;">Equipo</th>
         <th style="padding:4px 6px;text-align:center;font-size:11px;">Goles recibidos/pj</th>
+        <th style="padding:4px 6px;text-align:center;font-size:11px;">Corners concedidos/pj</th>
         <th style="padding:4px 6px;text-align:center;font-size:11px;">Remates recibidos/pj</th>
         <th style="padding:4px 6px;text-align:center;font-size:11px;">Nivel def.</th>
       </tr></thead>
@@ -1467,6 +1520,7 @@ function buildDefPanel(m){
         ${h?`<tr style="border-bottom:1px solid #f0f0f0;">
           <td style="padding:4px 6px;font-weight:600;">${m.home.name}</td>
           <td style="padding:4px 6px;text-align:center;">${h.avgGoalsAgainst}</td>
+          <td style="padding:4px 6px;text-align:center;">${h.avgCornersAgainst||'—'}</td>
           <td style="padding:4px 6px;text-align:center;">${h.avgShotsAgainst}</td>
           <td style="padding:4px 6px;text-align:center;"><span class="badge ${defCls(h.defensiveRating)}">${h.defensiveRating}</span></td>
         </tr>`:''}
@@ -1751,12 +1805,17 @@ async function runAnalysis(){
 
   // Cargar odds de inputs
   valid.forEach(m=>{
-    m.odds.h=parseFloat(document.getElementById(`oh-${m.fixtureId}`)?.value)||2.0;
-    m.odds.d=parseFloat(document.getElementById(`od-${m.fixtureId}`)?.value)||3.5;
-    m.odds.a=parseFloat(document.getElementById(`oa-${m.fixtureId}`)?.value)||3.0;
+    const rawH = parseFloat(document.getElementById(`oh-${m.fixtureId}`)?.value);
+    const rawD = parseFloat(document.getElementById(`od-${m.fixtureId}`)?.value);
+    const rawA = parseFloat(document.getElementById(`oa-${m.fixtureId}`)?.value);
+    m.odds.h = (rawH > 1.01) ? rawH : 2.0;
+    m.odds.d = (rawD > 1.01) ? rawD : 3.5;
+    m.odds.a = (rawA > 1.01) ? rawA : 3.0;
   });
 
-  btn.innerHTML=`<span class="spinner"></span>Analizando ${valid.length} partidos...`;
+  var pw=document.getElementById('analysis-progress-wrap'); if(pw) pw.style.display='block';
+  updateProgressBar(5,'Iniciando analisis...');
+  btn.innerHTML='<span class="spinner"></span>Analizando...';
 
   await Promise.all(valid.map(async m => {
     // Stats con contexto local/visitante y forma ponderada
@@ -1842,6 +1901,8 @@ async function runAnalysis(){
     }
   }));
   btn.disabled=false;btn.innerHTML='Analizar combinaciones';
+  updateProgressBar(100,'Analisis completado');
+  setTimeout(function(){ const pw=document.getElementById('analysis-progress-wrap'); if(pw) pw.style.display='none'; }, 2000);
   // Mostrar alertas de movimiento de linea si las hay
   valid.forEach(function(m) {
     if (m.lineMovementAlert?.significant) {
@@ -2084,14 +2145,16 @@ function calcBets(m){
   // Estadísticas defensivas del rival
   const hDef=m.homeDefensive, aDef=m.awayDefensive;
   // Cuánto permite generar el rival al equipo analizado
-  const rivalAllowsGoals = (hDef?.avgGoalsAgainst||null); // goles que recibe el local de media
-  const rivalAllowsShots = (aDef?.avgShotsAgainst||null); // remates que recibe el visitante
+  const rivalAllowsGoals = (hDef?.avgGoalsAgainst||null);
+  const rivalAllowsShots = (aDef?.avgShotsAgainst||null);
   const homeDefRating = hDef?.defensiveRating||'media';
   const awayDefRating = aDef?.defensiveRating||'media';
-  // Ajuste defensivo: si el rival tiene defensa elite, reducir expectativa ofensiva del equipo
+  // Corners concedidos por cada equipo (cuántos corners PERMITE que le saquen)
+  const hCornersAgainst = hDef?.avgCornersAgainst || null; // corners que recibe el local de media
+  const aCornersAgainst = aDef?.avgCornersAgainst || null; // corners que recibe el visitante de media
   const defGoalsAdj = {elite:-0.4, solida:-0.2, media:0, debil:0.3};
-  const hDefAdj = defGoalsAdj[awayDefRating]||0; // ajuste al ataque del local según defensa rival
-  const aDefAdj = defGoalsAdj[homeDefRating]||0; // ajuste al ataque del visitante según defensa rival
+  const hDefAdj = defGoalsAdj[awayDefRating]||0;
+  const aDefAdj = defGoalsAdj[homeDefRating]||0;
 
   // xG — goles esperados
   const hXGdata=m.homeXG, aXGdata=m.awayXG;
@@ -2298,7 +2361,16 @@ function calcBets(m){
   if(af2>=2.5&&ag>=2.0) bets.push({market:'Ambos equipos marcan',odds:1.85,confidence:Math.min(92,Math.max(35,bttsConf+(h2h&&h2h.bttsRate>=0.6?8:h2h&&h2h.bttsRate>=0.5?4:0)+(poisBTTSConf&&poisBTTSConf>55?5:0)+dixonColesAdj.btts)),factors:'FWD'+h2hTag+hvTag+poisTag+playerTag+injTag,reason:`Delanteros: ${af2.toFixed(1)} rem/pj${h2h?` · BTTS H2H:${Math.round(h2h.bttsRate*100)}%`:''}${poisBTTSConf?` · Poisson: ${poisBTTSConf}%`:''}${playerNote}`});
 
   // ── MERCADO DE CORNERS ───────────────────────────────────────────────────
-  const totalCorners = hCornersSafe + aCornersSafe + weatherCornersAdj;
+  // Fórmula cruzada: promedia lo que genera cada equipo CON lo que concede el rival
+  // Esto captura partidos de mucha diferencia de nivel (ej: Argentina vs Cabo Verde)
+  // donde un equipo domina y saca muchos corners aunque el rival genere pocos.
+  const hCornersExp = hCornersAgainst !== null
+    ? (hCornersSafe + hCornersAgainst) / 2   // local: promedia corners generados vs concedidos por rival
+    : hCornersSafe;
+  const aCornersExp = aCornersAgainst !== null
+    ? (aCornersSafe + aCornersAgainst) / 2   // visitante: promedia corners generados vs concedidos por rival
+    : aCornersSafe;
+  const totalCorners = hCornersExp + aCornersExp + weatherCornersAdj;
   if (totalCorners >= 9.5) {
     const cornersLine = totalCorners >= 11 ? 10.5 : 9.5;
     const cornersConf = Math.min(85, Math.round(52 + (totalCorners - cornersLine) * 12 + (isRainy ? -5 : 0)));
@@ -2325,7 +2397,12 @@ function calcBets(m){
   }
 
   // ── MERCADO DE TARJETAS ──────────────────────────────────────────────────
-  const totalCards = hCardsSafe + aCardsSafe + (ref?.avgCards ? (ref.avgCards - 4.0) * 0.3 : 0) + weatherCardsAdj + (necDiff !== 0 || isHighStakes ? 0.3 : 0);
+  // Cards también usa la fórmula cruzada con cardsAgainst si disponible
+  const hCardsAgainst = hDef?.avgCardsAgainst || null;
+  const aCardsAgainst = aDef?.avgCardsAgainst || null;
+  const hCardsExp = hCardsAgainst !== null ? (hCardsSafe + hCardsAgainst) / 2 : hCardsSafe;
+  const aCardsExp = aCardsAgainst !== null ? (aCardsSafe + aCardsAgainst) / 2 : aCardsSafe;
+  const totalCards = hCardsExp + aCardsExp + (ref?.avgCards ? (ref.avgCards - 4.0) * 0.3 : 0) + weatherCardsAdj + (necDiff !== 0 || isHighStakes ? 0.3 : 0);
   if (totalCards >= 4.3) {
     const cardsLine = totalCards >= 5.2 ? 4.5 : 3.5;
     const cardsConf = Math.min(85, Math.round(54 + (totalCards - cardsLine) * 14 + (ref?.strictness === 'estricto' ? 6 : 0) + (isHighStakes ? 4 : 0)));
@@ -2762,6 +2839,133 @@ function renderResults(data){
   }
 }
 
+// ── LIQUIDACION RAPIDA DESDE HOY ─────────────────────────────────────────
+function quickSettleFromToday(homeName, awayName) {
+  var h = getHistory();
+  var pending = h.filter(function(b){ return b.match && b.match.indexOf(homeName) >= 0 && b.result === 'pending'; });
+  if (!pending.length) { showToast('No hay apuestas pendientes para este partido', 'info'); return; }
+  var ov = document.createElement('div');
+  ov.id = '_settle_ov';
+  ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:100000;display:flex;align-items:center;justify-content:center;';
+  var box = document.createElement('div');
+  box.style.cssText = 'background:#fff;border-radius:14px;padding:1.25rem;max-width:340px;width:90%;max-height:80vh;overflow-y:auto;box-shadow:0 8px 32px rgba(0,0,0,.18);';
+  var title = document.createElement('p');
+  title.style.cssText = 'font-size:14px;font-weight:500;color:#1a1a1a;margin-bottom:12px;';
+  title.textContent = homeName + ' vs ' + awayName;
+  box.appendChild(title);
+  pending.forEach(function(b) {
+    var card = document.createElement('div');
+    card.style.cssText = 'background:#f9f9f9;border-radius:8px;padding:10px 12px;margin-bottom:6px;';
+    var mkt = document.createElement('p');
+    mkt.style.cssText = 'font-size:13px;font-weight:500;color:#1a1a1a;margin:0 0 4px;';
+    mkt.textContent = b.market;
+    var info = document.createElement('p');
+    info.style.cssText = 'font-size:12px;color:#666;margin:0;';
+    info.textContent = b.odds + 'x · ' + b.confidence + '% conf.';
+    var btnRow = document.createElement('div');
+    btnRow.style.cssText = 'display:flex;gap:6px;margin-top:8px;';
+    var wonBtn = document.createElement('button');
+    wonBtn.textContent = 'Gano';
+    wonBtn.style.cssText = 'flex:1;background:#EAF3DE;color:#3B6D11;border:1px solid #c0dd97;border-radius:6px;padding:6px;font-size:12px;font-weight:500;cursor:pointer;';
+    wonBtn.onclick = (function(id){ return function(){ settleQuick(id, true); }; })(b.id);
+    var lostBtn = document.createElement('button');
+    lostBtn.textContent = 'Perdio';
+    lostBtn.style.cssText = 'flex:1;background:#FCEBEB;color:#A32D2D;border:1px solid #f7c1c1;border-radius:6px;padding:6px;font-size:12px;font-weight:500;cursor:pointer;';
+    lostBtn.onclick = (function(id){ return function(){ settleQuick(id, false); }; })(b.id);
+    btnRow.appendChild(wonBtn);
+    btnRow.appendChild(lostBtn);
+    card.appendChild(mkt);
+    card.appendChild(info);
+    card.appendChild(btnRow);
+    box.appendChild(card);
+  });
+  var closeBtn = document.createElement('button');
+  closeBtn.textContent = 'Cerrar';
+  closeBtn.style.cssText = 'width:100%;background:#f5f5f0;border:1px solid #ddd;border-radius:8px;padding:8px;font-size:13px;cursor:pointer;margin-top:6px;';
+  closeBtn.onclick = closeSettleOverlay;
+  box.appendChild(closeBtn);
+  ov.appendChild(box);
+  document.body.appendChild(ov);
+  window._settleOverlay = ov;
+}
+
+function closeSettleOverlay() {
+  if (window._settleOverlay) window._settleOverlay.remove();
+}
+
+function settleQuick(betId, won) {
+  settleBetPrompt(parseInt(betId), won);
+  window._settleOverlay && window._settleOverlay.remove();
+  setTimeout(renderToday, 500);
+}
+
+// ── ROI POR LIGA ──────────────────────────────────────────────────────────
+function getRoiByLeague() {
+  const h = getHistory().filter(function(b){ return b.result !== 'pending'; });
+  const byLeague = {};
+  h.forEach(function(b) {
+    const league = (b.match || '').split(' - ')[0] || 'Otras';
+    if (!byLeague[league]) byLeague[league] = { wins: 0, total: 0, staked: 0, returned: 0 };
+    byLeague[league].total++;
+    byLeague[league].staked += b.amount || 0;
+    if (b.result === 'win') {
+      byLeague[league].wins++;
+      byLeague[league].returned += (b.amount || 0) * b.odds;
+    }
+  });
+  return Object.entries(byLeague).map(function(e) {
+    const d = e[1];
+    return {
+      league: e[0],
+      total: d.total,
+      winRate: d.total ? Math.round(d.wins/d.total*100) : 0,
+      roi: d.staked > 0 ? parseFloat(((d.returned-d.staked)/d.staked*100).toFixed(1)) : 0,
+    };
+  }).sort(function(a,b){ return b.roi - a.roi; });
+}
+
+// ── NOTIFICACION PARTIDOS PROXIMOS ────────────────────────────────────────
+function checkUpcomingBets() {
+  const h = getHistory().filter(function(b){ return b.result === 'pending'; });
+  if (!h.length) return;
+  const now = Date.now();
+  const twoHours = 2 * 60 * 60 * 1000;
+  h.forEach(function(b) {
+    if (!b.date) return;
+    const matchTime = new Date(b.date).getTime();
+    const diff = matchTime - now;
+    if (diff > 0 && diff < twoHours) {
+      const mins = Math.round(diff / 60000);
+      showToast('Partido en ' + mins + ' min: ' + b.match + ' · ' + b.market + ' @ ' + b.odds + 'x', 'warning', 8000);
+    }
+  });
+}
+
+// ── FILTRO DE RESULTADOS POR EV Y CONFIANZA ────────────────────────────────
+function filterByEV() {
+  const minEV = parseFloat(document.getElementById('ev-filter')?.value || 0);
+  const minConf = parseFloat(document.getElementById('conf-filter')?.value || 60);
+  const cards = document.querySelectorAll('.bet-result-card');
+  let visible = 0;
+  cards.forEach(function(card) {
+    const ev = parseFloat(card.dataset.ev || 0);
+    const conf = parseFloat(card.dataset.conf || 0);
+    const show = ev >= minEV && conf >= minConf;
+    card.style.display = show ? '' : 'none';
+    if (show) visible++;
+  });
+  const counter = document.getElementById('visible-count');
+  if (counter) counter.textContent = visible + ' jugada(s) visible(s)';
+}
+
+// ── BARRA DE PROGRESO VISUAL ──────────────────────────────────────────────
+function updateProgressBar(pct, label) {
+  const bar = document.getElementById('analysis-progress-bar');
+  const lbl = document.getElementById('analysis-progress-label');
+  if (bar) bar.style.width = pct + '%';
+  if (lbl) lbl.textContent = label || (pct + '%');
+}
+
 // ── ROI CHART ──────────────────────────────────────────────────────────────
 function drawROIChart() {
   var canvas = document.getElementById('roi-chart');
@@ -3086,6 +3290,9 @@ function saveTodayExtraLeagues(arr) {
   try { localStorage.setItem(TODAY_EXTRA_KEY, JSON.stringify(arr)); } catch(e) {}
 }
 
+// Store fixtures for onclick access (avoids JSON in onclick attributes)
+var _todayFixtures = {};
+
 async function renderToday() {
   const c = document.getElementById('today-content');
   c.innerHTML = '<div style="padding:1rem;text-align:center;"><span class="spinner"></span> Cargando partidos del dia...</div>';
@@ -3187,20 +3394,27 @@ async function renderToday() {
       group.fixtures.forEach(function(f) {
         const matchTime = new Date(f.date).toLocaleTimeString('es-PE', {hour:'2-digit',minute:'2-digit'});
         const isLive = f.status?.short === '1H' || f.status?.short === '2H' || f.status?.short === 'HT';
-        html += '<div class="fixture-card" style="display:flex;align-items:center;gap:10px;padding:10px 12px;margin-bottom:4px;cursor:pointer;" onclick="quickAddToSelection(' + JSON.stringify({id:f.fixtureId,home:f.home,away:f.away,date:f.date,leagueKey:f.league.key}).replace(/"/g,"'") + ')">'
+        const matchKey = f.home.name + ' vs ' + f.away.name;
+        const pendingBets = getHistory().filter(function(b){ return b.match && b.match.includes(f.home.name) && b.result === 'pending'; });
+        const hasPending = pendingBets.length > 0;
+        // Store fixture data for safe onclick access
+        _todayFixtures[f.fixtureId] = {id:f.fixtureId, home:f.home, away:f.away, date:f.date, leagueKey:f.league.key};
+        html += '<div class="fixture-card" style="display:flex;align-items:center;gap:10px;padding:10px 12px;margin-bottom:4px;cursor:pointer;" onclick="quickAddToSelection(_todayFixtures[' + f.fixtureId + '])">'
           + '<div style="min-width:45px;text-align:center;">'
+          + (hasPending ? '<span style="background:#EAF3DE;color:#3B6D11;font-size:10px;font-weight:600;padding:1px 5px;border-radius:4px;display:block;margin-bottom:2px;">' + pendingBets.length + ' apuesta</span>' : '')
           + (isLive
             ? '<span style="background:#FCEBEB;color:#A32D2D;font-size:11px;font-weight:600;padding:2px 6px;border-radius:6px;">EN VIVO</span>'
             : '<span style="font-size:13px;font-weight:500;color:#185FA5;">' + matchTime + '</span>')
           + '</div>'
           + '<div style="flex:1;">'
           + '<div style="font-size:13px;font-weight:500;color:#1a1a1a;">' + f.home.name + '</div>'
-          + '<div style="font-size:11px;color:#999;margin:1px 0;">vs</div>'
+          + '<div style="font-size:10px;color:#aaa;margin:1px 0;">vs</div>'
           + '<div style="font-size:13px;font-weight:500;color:#1a1a1a;">' + f.away.name + '</div>'
           + '</div>'
           + '<div style="text-align:right;">'
           + (f.referee ? '<div style="font-size:10px;color:#aaa;">' + f.referee.split(' ').slice(-1)[0] + '</div>' : '')
           + '<button style="background:#1a1a1a;color:#fff;border:none;border-radius:6px;padding:4px 8px;font-size:11px;cursor:pointer;margin-top:2px;">+ Analizar</button>'
+          + (hasPending ? '<button onclick="event.stopPropagation();quickSettleFromToday(_todayFixtures[' + f.fixtureId + '].home.name,_todayFixtures[' + f.fixtureId + '].away.name)" style="background:#3B6D11;color:#fff;border:none;border-radius:6px;padding:4px 8px;font-size:11px;cursor:pointer;margin-top:2px;display:block;">Liquidar (' + pendingBets.length + ')</button>' : '')
           + '</div>'
           + '</div>';
       });
@@ -3294,6 +3508,8 @@ document.addEventListener('DOMContentLoaded', function() {
   switchTab(tab);
   setTimeout(showDailySummary, 900);
   setTimeout(initSupabase, 500);
+  setTimeout(checkUpcomingBets, 1500);
+  setInterval(checkUpcomingBets, 5*60*1000);
 });
 </script>
 </body>
