@@ -120,6 +120,7 @@ input[type=range] { flex: 1; accent-color: #1a1a1a; height: 4px; }
 
   <div class="tab-bar">
     <button class="tab active" id="tb-config" onclick="switchTab('config')">Conexión</button>
+    <button class="tab" id="tb-today" onclick="switchTab('today');renderToday();">Hoy</button>
     <button class="tab" id="tb-select" onclick="switchTab('select');renderLeaguePicker();">Seleccionar partidos</button>
     <button class="tab" id="tb-matches" onclick="switchTab('matches');renderMatchSlots();">Mi selección <span id="sel-count"></span></button>
     <button class="tab" id="tb-results" onclick="switchTab('results')">Combinaciones</button>
@@ -160,6 +161,10 @@ input[type=range] { flex: 1; accent-color: #1a1a1a; height: 4px; }
   </div>
 
   <!-- SELECTOR DE PARTIDOS -->
+  <div id="tab-today" style="display:none;">
+    <div id="today-content"></div>
+  </div>
+
   <div id="tab-select" style="display:none;">
     <p class="section-label">Elige una liga</p>
     <div id="league-picker"></div>
@@ -290,7 +295,7 @@ const LEAGUES = [
 ];
 
 function switchTab(t) {
-  ['config','select','matches','results','history','bankroll','pro'].forEach(function(id) {
+  ['config','select','matches','results','history','bankroll','pro','today'].forEach(function(id) {
     document.getElementById('tab-'+id).style.display = t===id?'block':'none';
     const btn=document.getElementById('tb-'+id); if(btn) btn.classList.toggle('active', t===id);
   });
@@ -319,13 +324,19 @@ try { _sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY); } catch(e) {}
 let _sbUser = null;
 
 async function initSupabase() {
-  renderSupabaseStatus(false); // show banner immediately
+  renderSupabaseStatus(false);
   if (!_sb) return;
   try {
+    // Try to restore session from localStorage (Supabase saves it automatically)
     const { data } = await _sb.auth.getSession();
-    _sbUser = data.session?.user || null;
-    renderSupabaseStatus(_sbUser !== null);
-    if (_sbUser) showToast('Nube: conectado como ' + _sbUser.email, 'success', 3000);
+    if (data.session) {
+      _sbUser = data.session.user;
+      await _sb.auth.setSession(data.session);
+      renderSupabaseStatus(true);
+      showToast('Nube: reconectado como ' + _sbUser.email, 'success', 3000);
+    } else {
+      renderSupabaseStatus(false);
+    }
   } catch(e) {
     renderSupabaseStatus(false);
     console.warn('Supabase init failed:', e.message);
@@ -362,10 +373,10 @@ async function sbLogin() {
     var res = await _sb.auth.signInWithPassword({ email: email, password: pass });
     if (res.error) { showToast('Error: ' + res.error.message, 'error'); return; }
     _sbUser = res.data.user;
-    // Recreate client with session to ensure auth token is included in all requests
-    _sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY, {
-      global: { headers: { Authorization: 'Bearer ' + res.data.session.access_token } }
-    });
+    // Set session explicitly so RLS policies work
+    if (res.data.session) {
+      await _sb.auth.setSession(res.data.session);
+    }
     document.getElementById('_sb_ov') && document.getElementById('_sb_ov').remove();
     var sbForm = document.getElementById('sb-form');
     if (sbForm) sbForm.style.display = 'none';
@@ -3020,6 +3031,211 @@ function renderMonteCarloResult() {
     el.innerHTML += '<div style="background:#fcebeb;border:1px solid #f7c1c1;border-radius:8px;padding:10px 14px;font-size:12px;color:#A32D2D;margin-top:8px;">Probabilidad de ruina alta. Considera reducir el % de stake por apuesta.</div>';
   }
   showToast('Simulacion completada: 1000 trayectorias generadas', 'success');
+}
+
+// ── VISTA HOY ────────────────────────────────────────────────────────────────
+// Prioridad de ligas: top europeas > competiciones UEFA > Sudamerica > resto
+const LEAGUE_PRIORITY = {
+  2: 1,   // Champions League
+  3: 2,   // Europa League
+  848: 3, // Conference League
+  39: 4,  // Premier League
+  140: 5, // La Liga
+  135: 6, // Serie A
+  78: 7,  // Bundesliga
+  61: 8,  // Ligue 1
+  11: 9,  // Libertadores
+  1: 10,  // Mundial FIFA
+  9: 11,  // Copa America
+  5: 12,  // Eurocopa
+  15: 13, // Mundial Clubes
+  10: 14, // Nations League
+  94: 15, // Primeira Liga
+  88: 16, // Eredivisie
+  71: 17, // Brasileirao
+  128: 18, // Argentina
+  262: 19, // Liga MX
+  253: 20, // MLS
+  265: 21, // Chile
+  281: 22, // Liga 1 Peru
+  307: 23, // Saudi Pro League
+  239: 24, // Liga BetPlay
+};
+
+// Ligas extra que el usuario puede agregar manualmente
+const TODAY_EXTRA_KEY = 'betting_tool_today_extra_v1';
+function getTodayExtraLeagues() {
+  try { return JSON.parse(localStorage.getItem(TODAY_EXTRA_KEY) || '[]'); } catch(e) { return []; }
+}
+function saveTodayExtraLeagues(arr) {
+  try { localStorage.setItem(TODAY_EXTRA_KEY, JSON.stringify(arr)); } catch(e) {}
+}
+
+async function renderToday() {
+  const c = document.getElementById('today-content');
+  c.innerHTML = '<div style="padding:1rem;text-align:center;"><span class="spinner"></span> Cargando partidos del dia...</div>';
+
+  const proxyUrl = PROXY();
+  if (!proxyUrl || proxyUrl.length < 10) {
+    c.innerHTML = '<div class="card"><p style="color:#854F0B;font-size:13px;">Configura el proxy en la pestana Conexion primero.</p></div>';
+    return;
+  }
+
+  // Combinar ligas configuradas + extras del usuario
+  const extraLeagues = getTodayExtraLeagues();
+  const allLeagues = LEAGUES.concat(extraLeagues);
+  const uniqueLeagues = allLeagues.filter(function(l, i, arr) {
+    return arr.findIndex(function(x){ return x.id === l.id; }) === i;
+  });
+
+  // Ordenar por prioridad
+  const sorted = uniqueLeagues.slice().sort(function(a, b) {
+    const pa = LEAGUE_PRIORITY[a.id] || 99;
+    const pb = LEAGUE_PRIORITY[b.id] || 99;
+    return pa - pb;
+  });
+
+  // Fetch partidos de hoy para cada liga en paralelo (max 8 ligas a la vez)
+  const today = new Date().toISOString().split('T')[0];
+  const tomorrow = new Date(Date.now() + 24*60*60*1000).toISOString().split('T')[0];
+
+  let allFixtures = [];
+  const batchSize = 6;
+  for (let i = 0; i < sorted.length; i += batchSize) {
+    const batch = sorted.slice(i, i + batchSize);
+    const results = await Promise.allSettled(batch.map(async function(league) {
+      try {
+        const d = await get('/fixtures/upcoming?leagueId=' + league.id);
+        if (!d.fixtures || !d.fixtures.length) return [];
+        // Filter fixtures within next 24 hours (using UTC timestamps to avoid timezone issues)
+        const nowMs = Date.now();
+        const in24h = nowMs + 24*60*60*1000;
+        return d.fixtures
+          .filter(function(f) {
+            const fMs = new Date(f.date).getTime();
+            return fMs >= nowMs - 3*60*60*1000 && fMs <= in24h; // desde hace 3h hasta 24h adelante
+          })
+          .map(function(f) {
+            return Object.assign({}, f, { league: league, priority: LEAGUE_PRIORITY[league.id] || 99 });
+          });
+      } catch(e) { return []; }
+    }));
+    results.forEach(function(r) {
+      if (r.status === 'fulfilled') allFixtures = allFixtures.concat(r.value);
+    });
+  }
+
+  // Sort by priority then by time
+  allFixtures.sort(function(a, b) {
+    if (a.priority !== b.priority) return a.priority - b.priority;
+    return new Date(a.date) - new Date(b.date);
+  });
+
+  // Group by league
+  const byLeague = {};
+  allFixtures.forEach(function(f) {
+    const key = f.league.id;
+    if (!byLeague[key]) byLeague[key] = { league: f.league, fixtures: [] };
+    byLeague[key].fixtures.push(f);
+  });
+
+  // Render
+  let html = '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;flex-wrap:wrap;gap:8px;">'
+    + '<p style="font-size:13px;color:#555;">' + allFixtures.length + ' partido(s) en las proximas 24 horas</p>'
+    + '<button onclick="showAddLeagueForm()" class="btn-sec" style="font-size:12px;padding:6px 12px;">+ Agregar liga</button>'
+    + '</div>';
+
+  // Add league form (hidden by default)
+  html += '<div id="add-league-form" style="display:none;background:#fff;border:1px solid #e5e5e5;border-radius:12px;padding:14px;margin-bottom:12px;">'
+    + '<p style="font-size:13px;font-weight:500;margin-bottom:8px;">Agregar liga por ID de API-Football</p>'
+    + '<div style="display:flex;gap:8px;">'
+    + '<input id="extra-league-id" type="number" placeholder="ID (ej: 307)" style="flex:1;border:1px solid #ddd;border-radius:8px;padding:7px 10px;font-size:13px;">'
+    + '<input id="extra-league-name" type="text" placeholder="Nombre" style="flex:2;border:1px solid #ddd;border-radius:8px;padding:7px 10px;font-size:13px;">'
+    + '<button onclick="addExtraLeague()" style="background:#1a1a1a;color:#fff;border:none;border-radius:8px;padding:7px 14px;font-size:13px;cursor:pointer;">Agregar</button>'
+    + '</div>'
+    + '<p style="font-size:11px;color:#999;margin-top:6px;">Busca el ID en api-football.com/documentation</p>'
+    + '</div>';
+
+  if (allFixtures.length === 0) {
+    html += '<div class="card" style="text-align:center;padding:2rem;">'
+      + '<p style="color:#999;font-size:13px;">No se encontraron partidos para hoy.</p>'
+      + '<p style="color:#999;font-size:12px;margin-top:4px;">Puede que el proxy este dormido — intenta en 30 segundos.</p>'
+      + '</div>';
+  } else {
+    Object.values(byLeague).forEach(function(group) {
+      html += '<div style="margin-bottom:16px;">'
+        + '<div style="display:flex;align-items:center;gap:6px;margin-bottom:6px;">'
+        + '<span style="font-size:14px;">' + group.league.flag + '</span>'
+        + '<span style="font-size:12px;font-weight:500;color:#555;text-transform:uppercase;letter-spacing:0.05em;">' + group.league.label + '</span>'
+        + (LEAGUE_PRIORITY[group.league.id] <= 5 ? '<span style="background:#E6F1FB;color:#185FA5;font-size:10px;padding:1px 6px;border-radius:10px;font-weight:500;">TOP</span>' : '')
+        + '</div>';
+      group.fixtures.forEach(function(f) {
+        const matchTime = new Date(f.date).toLocaleTimeString('es-PE', {hour:'2-digit',minute:'2-digit'});
+        const isLive = f.status?.short === '1H' || f.status?.short === '2H' || f.status?.short === 'HT';
+        html += '<div class="fixture-card" style="display:flex;align-items:center;gap:10px;padding:10px 12px;margin-bottom:4px;cursor:pointer;" onclick="quickAddToSelection(' + JSON.stringify({id:f.fixtureId,home:f.home,away:f.away,date:f.date}).replace(/"/g,"'") + ')">'
+          + '<div style="min-width:45px;text-align:center;">'
+          + (isLive
+            ? '<span style="background:#FCEBEB;color:#A32D2D;font-size:11px;font-weight:600;padding:2px 6px;border-radius:6px;">EN VIVO</span>'
+            : '<span style="font-size:13px;font-weight:500;color:#185FA5;">' + matchTime + '</span>')
+          + '</div>'
+          + '<div style="flex:1;">'
+          + '<div style="font-size:13px;font-weight:500;color:#1a1a1a;">' + f.home.name + '</div>'
+          + '<div style="font-size:11px;color:#999;margin:1px 0;">vs</div>'
+          + '<div style="font-size:13px;font-weight:500;color:#1a1a1a;">' + f.away.name + '</div>'
+          + '</div>'
+          + '<div style="text-align:right;">'
+          + (f.referee ? '<div style="font-size:10px;color:#aaa;">' + f.referee.split(' ').slice(-1)[0] + '</div>' : '')
+          + '<button style="background:#1a1a1a;color:#fff;border:none;border-radius:6px;padding:4px 8px;font-size:11px;cursor:pointer;margin-top:2px;">+ Analizar</button>'
+          + '</div>'
+          + '</div>';
+      });
+      html += '</div>';
+    });
+  }
+
+  c.innerHTML = html;
+}
+
+function showAddLeagueForm() {
+  var f = document.getElementById('add-league-form');
+  if (f) f.style.display = f.style.display === 'none' ? 'block' : 'none';
+}
+
+function addExtraLeague() {
+  var idEl = document.getElementById('extra-league-id');
+  var nameEl = document.getElementById('extra-league-name');
+  var id = parseInt(idEl.value);
+  var name = nameEl.value.trim();
+  if (!id || !name) { showToast('Ingresa ID y nombre', 'warning'); return; }
+  var extras = getTodayExtraLeagues();
+  if (extras.find(function(l){ return l.id === id; })) { showToast('Liga ya agregada', 'warning'); return; }
+  extras.push({ id: id, label: name, flag: 'EN', key: 'soccer_extra_' + id });
+  saveTodayExtraLeagues(extras);
+  idEl.value = ''; nameEl.value = '';
+  showAddLeagueForm();
+  showToast(name + ' agregada', 'success');
+  renderToday();
+}
+
+function quickAddToSelection(fixture) {
+  // Check if already added
+  var existing = matches.find(function(m){ return m.fixtureId === fixture.id; });
+  if (existing) { showToast('Partido ya en tu seleccion', 'warning'); return; }
+  if (matches.length >= 4) { showToast('Maximo 4 partidos. Quita uno antes.', 'warning'); return; }
+  matches.push({
+    fixtureId: fixture.id,
+    home: fixture.home,
+    away: fixture.away,
+    date: fixture.date,
+    league: 'today',
+    odds: {h: '', d: '', a: ''},
+    stats: null, h2h: null, h2hStats: null,
+    oddsData: null, injuries: null, lineups: null, prediction: null,
+  });
+  updateSelCount();
+  renderMatchSlots();
+  showToast(fixture.home.name + ' vs ' + fixture.away.name + ' agregado', 'success');
+  switchTab('matches');
 }
 
 // ── EXPORT ─────────────────────────────────────────────────────────────────
