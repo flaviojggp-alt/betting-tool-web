@@ -35,9 +35,10 @@ export default function DashboardPage() {
   const pendingBets = bets.filter(b => b.result === 'pending')
   const resolvedBets = bets.filter(b => b.result !== 'pending')
   const wins = resolvedBets.filter(b => b.result === 'win').length
-  const roi = resolvedBets.length
-    ? ((resolvedBets.reduce((s, b) => s + (b.result === 'win' ? b.amount * (b.odds - 1) : -b.amount), 0) /
-        resolvedBets.reduce((s, b) => s + b.amount, 0)) * 100).toFixed(1)
+  const totalStaked = resolvedBets.reduce((s, b) => s + (b.amount || 0), 0)
+  const roi = resolvedBets.length && totalStaked > 0
+    ? ((resolvedBets.reduce((s, b) => s + (b.result === 'win' ? (b.amount||0) * (b.odds - 1) : -(b.amount||0)), 0) /
+        totalStaked) * 100).toFixed(1)
     : '0.0'
 
   if (loading) return (
