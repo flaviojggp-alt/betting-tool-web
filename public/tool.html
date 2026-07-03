@@ -2150,8 +2150,14 @@ function calcBets(m){
   const homeDefRating = hDef?.defensiveRating||'media';
   const awayDefRating = aDef?.defensiveRating||'media';
   // Corners concedidos por cada equipo (cuántos corners PERMITE que le saquen)
-  const hCornersAgainst = hDef?.avgCornersAgainst || null; // corners que recibe el local de media
-  const aCornersAgainst = aDef?.avgCornersAgainst || null; // corners que recibe el visitante de media
+  // Si avgCornersAgainst es 0 o null (datos insuficientes), estimar por calidad defensiva
+  const cornersAgainstByRating = { elite: 3.5, solida: 5.0, media: 6.5, debil: 9.0 }; // debil = ~9 corners concedidos por partido ante rivales fuertes
+  const hCornersAgainst = (hDef?.avgCornersAgainst > 0)
+    ? hDef.avgCornersAgainst
+    : (hDef ? cornersAgainstByRating[hDef.defensiveRating] || 5.0 : null);
+  const aCornersAgainst = (aDef?.avgCornersAgainst > 0)
+    ? aDef.avgCornersAgainst
+    : (aDef ? cornersAgainstByRating[aDef.defensiveRating] || 5.0 : null);
   const defGoalsAdj = {elite:-0.4, solida:-0.2, media:0, debil:0.3};
   const hDefAdj = defGoalsAdj[awayDefRating]||0;
   const aDefAdj = defGoalsAdj[homeDefRating]||0;
@@ -2398,8 +2404,13 @@ function calcBets(m){
 
   // ── MERCADO DE TARJETAS ──────────────────────────────────────────────────
   // Cards también usa la fórmula cruzada con cardsAgainst si disponible
-  const hCardsAgainst = hDef?.avgCardsAgainst || null;
-  const aCardsAgainst = aDef?.avgCardsAgainst || null;
+  const cardsAgainstByRating = { elite: 2.5, solida: 3.0, media: 3.5, debil: 4.5 };
+  const hCardsAgainst = (hDef?.avgCardsAgainst > 0)
+    ? hDef.avgCardsAgainst
+    : (hDef ? cardsAgainstByRating[hDef.defensiveRating] || 3.0 : null);
+  const aCardsAgainst = (aDef?.avgCardsAgainst > 0)
+    ? aDef.avgCardsAgainst
+    : (aDef ? cardsAgainstByRating[aDef.defensiveRating] || 3.0 : null);
   const hCardsExp = hCardsAgainst !== null ? (hCardsSafe + hCardsAgainst) / 2 : hCardsSafe;
   const aCardsExp = aCardsAgainst !== null ? (aCardsSafe + aCardsAgainst) / 2 : aCardsSafe;
   const totalCards = hCardsExp + aCardsExp + (ref?.avgCards ? (ref.avgCards - 4.0) * 0.3 : 0) + weatherCardsAdj + (necDiff !== 0 || isHighStakes ? 0.3 : 0);
