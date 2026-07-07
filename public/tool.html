@@ -2790,10 +2790,10 @@ function renderResults(data){
   filteredBets.forEach((item,idx)=>{
     const bet=item.legs[0];
     // Add executive summary and risk panel per match
-    const matchSummaryHtml = item.match ? buildExecutiveSummary(item.match, item.legs) + buildRiskPanel(item.match, item.legs) : '';
-    if (matchSummaryHtml && idx === filteredBets.findIndex(x=>x.matchLabel===item.matchLabel)) {
+    const matchObj = item.matchObj || null;
+    if (matchObj && idx === filteredBets.findIndex(function(x){ return x.matchLabel===item.matchLabel; })) {
       const summaryDiv = document.createElement('div');
-      summaryDiv.innerHTML = matchSummaryHtml;
+      summaryDiv.innerHTML = buildExecutiveSummary(matchObj, item.legs) + buildRiskPanel(matchObj, item.legs);
       cc.appendChild(summaryDiv);
     }
     const conf=bet.confidence;
