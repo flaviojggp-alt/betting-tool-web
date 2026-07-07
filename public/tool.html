@@ -836,11 +836,14 @@ function buildMatchSlot(m){
     ${m.weather?buildWeatherPanel(m):''}
     ${m.refereeStats?buildRefereePanel(m):''}
     ${(m.homeGoalMin||m.awayGoalMin)?buildGoalMinPanel(m):''}
+    ${buildExecutiveSummary(m, mb.bets)}
+    ${buildRiskPanel(m, mb.bets)}
     ${m.prediction?buildPredPanel(m):''}
     ${m.poisson?buildPoissonPanel(m):''}
     ${m.oddsMovement?.found?buildMovementPanel(m):''}
     ${m.oddsAsian?.found?buildAsianPanel(m):''}
     ${(m.homePlayerImpact||m.awayPlayerImpact)?buildPlayerImpactPanel(m):''}
+    ${(m.homeScorers?.found||m.awayScorers?.found)?buildScorersPanel(m):''}
     ${(m.homeXG||m.awayXG)?buildXGPanel(m):''}
     ${(m.homeDefensive||m.awayDefensive)?buildDefPanel(m):''}
     ${m.oddsComparison?.found?buildOddsComparePanel(m):''}
@@ -1829,7 +1832,7 @@ async function runAnalysis(){
     } catch(e){ m.stats={home:fallback(m.home.name),away:fallback(m.away.name)}; }
 
     // Lesiones, H2H, predicciones, alineaciones, árbitro y clima en paralelo
-    const [hInj,aInj,h2dRaw,pred,lu,refData,venueCoords,importance,hGoalMin,aGoalMin,hFatigue,aFatigue,hDef,aDef,hXG,aXG,oddsComp,oddsMovement,oddsAsian,hPlayerImpact,aPlayerImpact] = await Promise.allSettled([
+    const [hInj,aInj,h2dRaw,pred,lu,refData,venueCoords,importance,hGoalMin,aGoalMin,hFatigue,aFatigue,hDef,aDef,hXG,aXG,oddsComp,oddsMovement,oddsAsian,hPlayerImpact,aPlayerImpact,hScorers,aScorers] = await Promise.allSettled([
       get(`/injuries?teamId=${m.home.id}`),
       get(`/injuries?teamId=${m.away.id}`),
       get(`/h2h?home=${m.home.id}&away=${m.away.id}&last=10`),
@@ -1851,6 +1854,8 @@ async function runAnalysis(){
       get(`/odds/asian?home=${encodeURIComponent(m.home.name)}&away=${encodeURIComponent(m.away.name)}&sport=${m.league}`),
       get(`/player-impact?teamId=${m.home.id}&fixtureId=${m.fixtureId}`),
       get(`/player-impact?teamId=${m.away.id}&fixtureId=${m.fixtureId}`),
+      get(`/players/scorers?teamId=${m.home.id}`).catch(()=>({found:false,players:[]})),
+      get(`/players/scorers?teamId=${m.away.id}`).catch(()=>({found:false,players:[]})),
     ]);
 
     m.injuries={
@@ -1875,6 +1880,8 @@ async function runAnalysis(){
     m.oddsAsian = oddsAsian.status==='fulfilled' ? oddsAsian.value : null;
     m.homePlayerImpact = hPlayerImpact.status==='fulfilled' ? hPlayerImpact.value : null;
     m.awayPlayerImpact = aPlayerImpact.status==='fulfilled' ? aPlayerImpact.value : null;
+    m.homeScorers = (hScorers && hScorers.status==='fulfilled') ? hScorers.value : null;
+    m.awayScorers = (aScorers && aScorers.status==='fulfilled') ? aScorers.value : null;
 
     // Calcular Poisson con los lambdas estimados
     if (m.stats?.home && m.stats?.away) {
@@ -2152,13 +2159,17 @@ function calcBets(m){
   const awayDefRating = aDef?.defensiveRating||'media';
   // Corners concedidos por cada equipo (cuántos corners PERMITE que le saquen)
   // Si avgCornersAgainst es 0 o null (datos insuficientes), estimar por calidad defensiva
-  const cornersAgainstByRating = { elite: 3.5, solida: 5.0, media: 6.5, debil: 9.0 }; // debil = ~9 corners concedidos por partido ante rivales fuertes
-  const hCornersAgainst = (hDef?.avgCornersAgainst > 0)
+  const cornersAgainstByRating = { elite: 3.5, solida: 5.0, media: 6.5, debil: 9.0 };
+  // Solo confiar en defensiveRating si tiene muestra suficiente (>= 4 partidos)
+  // Si sampleSize < 4, el rating puede ser erroneo (0 goles recibidos = "elite" sin datos)
+  const hDefReliable = hDef && (hDef.sampleSize || 0) >= 4;
+  const aDefReliable = aDef && (aDef.sampleSize || 0) >= 4;
+  const hCornersAgainst = (hDef?.avgCornersAgainst > 0 && hDefReliable)
     ? hDef.avgCornersAgainst
-    : (hDef ? cornersAgainstByRating[hDef.defensiveRating] || 5.0 : null);
-  const aCornersAgainst = (aDef?.avgCornersAgainst > 0)
+    : (hDefReliable ? cornersAgainstByRating[hDef.defensiveRating] || 5.0 : null);
+  const aCornersAgainst = (aDef?.avgCornersAgainst > 0 && aDefReliable)
     ? aDef.avgCornersAgainst
-    : (aDef ? cornersAgainstByRating[aDef.defensiveRating] || 5.0 : null);
+    : (aDefReliable ? cornersAgainstByRating[aDef.defensiveRating] || 5.0 : null);
   const defGoalsAdj = {elite:-0.4, solida:-0.2, media:0, debil:0.3};
   const hDefAdj = defGoalsAdj[awayDefRating]||0;
   const aDefAdj = defGoalsAdj[homeDefRating]||0;
@@ -2378,10 +2389,10 @@ function calcBets(m){
     ? (aCornersSafe + aCornersAgainst) / 2   // visitante: promedia corners generados vs concedidos por rival
     : aCornersSafe;
   const totalCorners = hCornersExp + aCornersExp + weatherCornersAdj;
-  if (totalCorners >= 9.5) {
-    const cornersLine = totalCorners >= 11 ? 10.5 : 9.5;
-    const cornersConf = Math.min(85, Math.round(52 + (totalCorners - cornersLine) * 12 + (isRainy ? -5 : 0)));
-    if (cornersConf >= 55) {
+  if (totalCorners >= 7.0) {
+    const cornersLine = totalCorners >= 11 ? 10.5 : totalCorners >= 9.0 ? 8.5 : 7.5;
+    const cornersConf = Math.min(85, Math.round(50 + (totalCorners - cornersLine) * 10 + (isRainy ? -5 : 0) + (hDefReliable && aDefReliable ? 5 : -5)));
+    if (cornersConf >= 52) {
       bets.push({
         market: `Mas de ${cornersLine} corners`,
         odds: cornersLine >= 10.5 ? 1.95 : 1.80,
@@ -2391,8 +2402,8 @@ function calcBets(m){
       });
     }
   } else if (totalCorners <= 7.5 && totalCorners > 0) {
-    const cornersConf = Math.min(80, Math.round(50 + (7.5 - totalCorners) * 12));
-    if (cornersConf >= 55) {
+    const cornersConf = Math.min(80, Math.round(50 + (7.5 - totalCorners) * 10 + (hDefReliable && aDefReliable ? 5 : -5)));
+    if (cornersConf >= 52) {
       bets.push({
         market: 'Menos de 8.5 corners',
         odds: 1.85,
@@ -2406,19 +2417,19 @@ function calcBets(m){
   // ── MERCADO DE TARJETAS ──────────────────────────────────────────────────
   // Cards también usa la fórmula cruzada con cardsAgainst si disponible
   const cardsAgainstByRating = { elite: 2.5, solida: 3.0, media: 3.5, debil: 4.5 };
-  const hCardsAgainst = (hDef?.avgCardsAgainst > 0)
+  const hCardsAgainst = (hDef?.avgCardsAgainst > 0 && hDefReliable)
     ? hDef.avgCardsAgainst
-    : (hDef ? cardsAgainstByRating[hDef.defensiveRating] || 3.0 : null);
-  const aCardsAgainst = (aDef?.avgCardsAgainst > 0)
+    : (hDefReliable ? cardsAgainstByRating[hDef.defensiveRating] || 3.0 : null);
+  const aCardsAgainst = (aDef?.avgCardsAgainst > 0 && aDefReliable)
     ? aDef.avgCardsAgainst
-    : (aDef ? cardsAgainstByRating[aDef.defensiveRating] || 3.0 : null);
+    : (aDefReliable ? cardsAgainstByRating[aDef.defensiveRating] || 3.0 : null);
   const hCardsExp = hCardsAgainst !== null ? (hCardsSafe + hCardsAgainst) / 2 : hCardsSafe;
   const aCardsExp = aCardsAgainst !== null ? (aCardsSafe + aCardsAgainst) / 2 : aCardsSafe;
   const totalCards = hCardsExp + aCardsExp + (ref?.avgCards ? (ref.avgCards - 4.0) * 0.3 : 0) + weatherCardsAdj + (necDiff !== 0 || isHighStakes ? 0.3 : 0);
-  if (totalCards >= 4.3) {
-    const cardsLine = totalCards >= 5.2 ? 4.5 : 3.5;
-    const cardsConf = Math.min(85, Math.round(54 + (totalCards - cardsLine) * 14 + (ref?.strictness === 'estricto' ? 6 : 0) + (isHighStakes ? 4 : 0)));
-    if (cardsConf >= 55) {
+  if (totalCards >= 3.5) {
+    const cardsLine = totalCards >= 5.0 ? 4.5 : totalCards >= 4.0 ? 3.5 : 2.5;
+    const cardsConf = Math.min(85, Math.round(52 + (totalCards - cardsLine) * 12 + (ref?.strictness === 'estricto' ? 6 : 0) + (isHighStakes ? 4 : 0) + (hDefReliable && aDefReliable ? 4 : -4)));
+    if (cardsConf >= 52) {
       bets.push({
         market: `Mas de ${cardsLine} tarjetas`,
         odds: cardsLine >= 4.5 ? 1.95 : 1.75,
@@ -2519,6 +2530,13 @@ function calcBets(m){
   }
   if(predWH&&(!h2h||h2h.homeWinRate<0.6)&&m.odds.h<=2.20) bets.push({market:`Victoria ${m.home.name}`,odds:m.odds.h,confidence:Math.min(78,Math.max(40,60+pB+necVictAdj+eloVictAdj)),factors:'Pred'+necTag+tramiteTag+eloTag,reason:`API predice local (${pred.percent?.home||''})${necNote}${eloNote}`});
 
+  // Aplicar calibracion global basada en historial del usuario
+  const calibAdj = getCalibrationAdj();
+  if (calibAdj !== 0) {
+    bets.forEach(function(b) {
+      b.confidence = Math.min(95, Math.max(40, b.confidence + calibAdj));
+    });
+  }
   return bets.sort((a,b)=>b.confidence-a.confidence);
 }
 
@@ -2953,6 +2971,33 @@ function checkUpcomingBets() {
   });
 }
 
+// ── PANEL GOLEADORES ────────────────────────────────────────────────────────
+function buildScorersPanel(m) {
+  const hS = m.homeScorers, aS = m.awayScorers;
+  if ((!hS || !hS.found) && (!aS || !aS.found)) return '';
+  const renderTeam = function(scorers, teamName) {
+    if (!scorers || !scorers.found || !scorers.players?.length) return '';
+    return '<div style="margin-bottom:10px;">'
+      + '<p style="font-size:11px;font-weight:600;color:#555;text-transform:uppercase;letter-spacing:0.05em;margin-bottom:6px;">' + teamName + '</p>'
+      + scorers.players.slice(0,5).map(function(p) {
+          return '<div style="display:flex;align-items:center;gap:8px;padding:5px 0;border-bottom:0.5px solid #f5f5f0;">'
+            + '<div style="flex:1;">'
+            + '<span style="font-size:13px;color:#1a1a1a;">' + p.name + '</span>'
+            + '<span style="font-size:11px;color:#999;margin-left:4px;">' + p.games + ' partidos</span>'
+            + '</div>'
+            + '<span style="font-size:12px;font-weight:600;color:#185FA5;">' + p.goals + ' gol' + (p.goals!==1?'es':'') + '</span>'
+            + '<span style="font-size:11px;color:#888;min-width:60px;text-align:right;">' + p.goalsPerGame + ' g/pj</span>'
+            + '</div>';
+        }).join('')
+      + '</div>';
+  };
+  return '<div style="background:#f5f5f0;border:1px solid #e0e0e0;border-radius:8px;padding:10px 12px;margin-bottom:8px;">'
+    + '<p class="section-label" style="margin-bottom:8px;">Goleadores del torneo</p>'
+    + renderTeam(hS, m.home.name)
+    + renderTeam(aS, m.away.name)
+    + '</div>';
+}
+
 // ── FILTRO DE RESULTADOS POR EV Y CONFIANZA ────────────────────────────────
 function filterByEV() {
   const minEV = parseFloat(document.getElementById('ev-filter')?.value || 0);
@@ -2976,6 +3021,119 @@ function updateProgressBar(pct, label) {
   const lbl = document.getElementById('analysis-progress-label');
   if (bar) bar.style.width = pct + '%';
   if (lbl) lbl.textContent = label || (pct + '%');
+}
+
+// ── PANEL RESUMEN EJECUTIVO ─────────────────────────────────────────────────
+// Vista compacta que resume el análisis de un partido en una sola tarjeta.
+// Muestra: confianza global, señales clave, calidad de datos, top jugadas.
+function buildExecutiveSummary(m, bets) {
+  if (!bets || !bets.length) return '';
+
+  // Calcular confianza global del modelo para este partido
+  const topBets = bets.slice(0, 3);
+  const avgConf = Math.round(topBets.reduce(function(s,b){ return s+b.confidence; }, 0) / topBets.length);
+  const globalColor = avgConf >= 72 ? '#3B6D11' : avgConf >= 62 ? '#854F0B' : '#A32D2D';
+  const globalLabel = avgConf >= 72 ? 'Alta' : avgConf >= 62 ? 'Media' : 'Baja';
+
+  // Señales positivas y negativas del análisis
+  const signals = [];
+  const warnings = [];
+
+  // Señales desde los factores de las mejores jugadas
+  const allFactors = bets.map(function(b){ return b.factors || ''; }).join(' ');
+  if (allFactors.includes('+xG')) signals.push('xG favorable');
+  if (allFactors.includes('+Elo')) signals.push('Elo superior');
+  if (allFactors.includes('Nec+')) signals.push('Mayor necesidad');
+  if (allFactors.includes('DOM')) signals.push('Dominio estadistico');
+  if (allFactors.includes('Pred')) signals.push('API predice resultado');
+  if (allFactors.includes('H2H')) signals.push('H2H favorable');
+  if (allFactors.includes('Pois')) signals.push('Poisson + Dixon-Coles');
+  if (allFactors.includes('COR')) signals.push('Corners dominados');
+
+  if (allFactors.includes('Tramite')) warnings.push('Posible partido de tramite');
+  if (allFactors.includes('-Suerte')) warnings.push('Racha de mala suerte');
+  if (allFactors.includes('+Suerte')) warnings.push('Sobrerendimiento reciente');
+  if (m.stats?.home?.dataQuality === 'poor' || m.stats?.away?.dataQuality === 'poor') warnings.push('Datos limitados del partido');
+  if (allFactors.includes('Lluvia')) warnings.push('Lluvia puede afectar el juego');
+
+  // Calidad de datos
+  const hSample = m.stats?.home?.global?.sampleSize || 0;
+  const aSample = m.stats?.away?.global?.sampleSize || 0;
+  const dataQuality = Math.min(hSample, aSample);
+  const dataColor = dataQuality >= 8 ? '#3B6D11' : dataQuality >= 4 ? '#854F0B' : '#A32D2D';
+  const dataLabel = dataQuality >= 8 ? 'Buena (' + dataQuality + ' partidos)' : dataQuality >= 4 ? 'Limitada (' + dataQuality + ' partidos)' : 'Insuficiente (' + dataQuality + ' partidos)';
+
+  // Top jugadas con EV
+  const topBetsHtml = topBets.map(function(b) {
+    const ev = +((b.confidence/100 * b.odds - 1) * 100).toFixed(1);
+    const evColor = ev >= 5 ? '#3B6D11' : ev >= 0 ? '#854F0B' : '#A32D2D';
+    return '<div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:0.5px solid #f0f0f0;">'
+      + '<div style="flex:1;">'
+      + '<span style="font-size:12px;font-weight:500;color:#1a1a1a;">' + b.market + '</span>'
+      + '<span style="font-size:11px;color:#999;margin-left:6px;">' + b.odds + 'x</span>'
+      + '</div>'
+      + '<span style="font-size:11px;font-weight:500;color:#555;">' + b.confidence + '% conf.</span>'
+      + '<span style="font-size:11px;font-weight:600;color:' + evColor + ';min-width:42px;text-align:right;">' + (ev>=0?'+':'') + ev + '% EV</span>'
+      + '</div>';
+  }).join('');
+
+  return '<div style="background:linear-gradient(135deg,#f8f9fa 0%,#ffffff 100%);border:1.5px solid #e0e0e0;border-radius:12px;padding:14px 16px;margin-bottom:10px;">'
+    + '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;">'
+    + '<span style="font-size:12px;font-weight:600;color:#555;text-transform:uppercase;letter-spacing:0.06em;">Resumen ejecutivo</span>'
+    + '<div style="display:flex;align-items:center;gap:6px;">'
+    + '<span style="font-size:11px;color:#888;">Confianza global:</span>'
+    + '<span style="font-size:14px;font-weight:700;color:' + globalColor + ';">' + avgConf + '% — ' + globalLabel + '</span>'
+    + '</div>'
+    + '</div>'
+    // Data quality bar
+    + '<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;padding:6px 10px;background:#f5f5f0;border-radius:6px;">'
+    + '<span style="font-size:11px;color:#888;">Calidad de datos:</span>'
+    + '<span style="font-size:11px;font-weight:500;color:' + dataColor + ';">' + dataLabel + '</span>'
+    + '</div>'
+    // Signals
+    + (signals.length ? '<div style="margin-bottom:8px;"><span style="font-size:11px;color:#3B6D11;font-weight:500;">A favor: </span>'
+    + signals.map(function(s){ return '<span style="font-size:11px;background:#EAF3DE;color:#3B6D11;padding:1px 7px;border-radius:10px;margin-right:4px;">' + s + '</span>'; }).join('')
+    + '</div>' : '')
+    + (warnings.length ? '<div style="margin-bottom:10px;"><span style="font-size:11px;color:#854F0B;font-weight:500;">Atencion: </span>'
+    + warnings.map(function(w){ return '<span style="font-size:11px;background:#FFF5E6;color:#854F0B;padding:1px 7px;border-radius:10px;margin-right:4px;">' + w + '</span>'; }).join('')
+    + '</div>' : '')
+    // Top bets
+    + '<div style="border-top:1px solid #efefef;padding-top:8px;margin-top:4px;">'
+    + '<span style="font-size:11px;color:#888;font-weight:500;">Top jugadas sugeridas:</span>'
+    + topBetsHtml
+    + '</div>'
+    + '</div>';
+}
+
+// ── PANEL DE RIESGO ──────────────────────────────────────────────────────────
+// Muestra explícitamente qué tan confiables son los datos del análisis.
+function buildRiskPanel(m, bets) {
+  const risks = [];
+  const hSample = m.stats?.home?.global?.sampleSize || 0;
+  const aSample = m.stats?.away?.global?.sampleSize || 0;
+  if (hSample < 4) risks.push({ level: 'alto', msg: m.home.name + ' tiene menos de 4 partidos — estadisticas poco confiables' });
+  if (aSample < 4) risks.push({ level: 'alto', msg: m.away.name + ' tiene menos de 4 partidos — estadisticas poco confiables' });
+  if (!m.homeDefensive && !m.awayDefensive) risks.push({ level: 'medio', msg: 'Sin datos defensivos — corners y tarjetas usan estimaciones' });
+  if (!m.poisson) risks.push({ level: 'medio', msg: 'Sin modelo Poisson — prediccion de goles menos precisa' });
+  if (!m.h2h?.length) risks.push({ level: 'medio', msg: 'Sin H2H disponible — Elo en valor neutro (1500)' });
+  if (!m.oddsMovement?.found) risks.push({ level: 'bajo', msg: 'Sin datos de movimiento de cuotas' });
+  if (!m.injuries?.home?.length && !m.injuries?.away?.length) risks.push({ level: 'bajo', msg: 'Sin datos de lesiones' });
+
+  if (!risks.length) risks.push({ level: 'bajo', msg: 'Todos los datos disponibles — analisis completo' });
+
+  const colors = { alto: '#A32D2D', medio: '#854F0B', bajo: '#3B6D11' };
+  const bg = { alto: '#FCEBEB', medio: '#FFF5E6', bajo: '#EAF3DE' };
+  const maxLevel = risks.some(r=>r.level==='alto') ? 'alto' : risks.some(r=>r.level==='medio') ? 'medio' : 'bajo';
+
+  return '<div style="border:1px solid ' + colors[maxLevel] + '33;border-radius:10px;padding:10px 14px;margin-bottom:8px;background:' + bg[maxLevel] + '44;">'
+    + '<p style="font-size:11px;font-weight:600;color:' + colors[maxLevel] + ';text-transform:uppercase;letter-spacing:0.05em;margin-bottom:6px;">Nivel de riesgo: ' + maxLevel.toUpperCase() + '</p>'
+    + risks.map(function(r){
+        return '<div style="display:flex;align-items:flex-start;gap:6px;margin-bottom:3px;">'
+          + '<span style="font-size:10px;font-weight:600;color:' + colors[r.level] + ';min-width:36px;padding-top:1px;">' + r.level.toUpperCase() + '</span>'
+          + '<span style="font-size:12px;color:#555;">' + r.msg + '</span>'
+          + '</div>';
+      }).join('')
+    + '</div>';
 }
 
 // ── ROI CHART ──────────────────────────────────────────────────────────────
@@ -3521,7 +3679,7 @@ document.addEventListener('DOMContentLoaded', function() {
   setTimeout(showDailySummary, 900);
   setTimeout(initSupabase, 500);
   setTimeout(checkUpcomingBets, 1500);
-  setInterval(checkUpcomingBets, 5*60*1000);
+  setInterval(checkUpcomingBets, 5*60*1000);;
 });
 </script>
 </body>
