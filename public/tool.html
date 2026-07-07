@@ -836,8 +836,6 @@ function buildMatchSlot(m){
     ${m.weather?buildWeatherPanel(m):''}
     ${m.refereeStats?buildRefereePanel(m):''}
     ${(m.homeGoalMin||m.awayGoalMin)?buildGoalMinPanel(m):''}
-    ${buildExecutiveSummary(m, mb.bets)}
-    ${buildRiskPanel(m, mb.bets)}
     ${m.prediction?buildPredPanel(m):''}
     ${m.poisson?buildPoissonPanel(m):''}
     ${m.oddsMovement?.found?buildMovementPanel(m):''}
@@ -2791,6 +2789,13 @@ function renderResults(data){
   }
   filteredBets.forEach((item,idx)=>{
     const bet=item.legs[0];
+    // Add executive summary and risk panel per match
+    const matchSummaryHtml = item.match ? buildExecutiveSummary(item.match, item.legs) + buildRiskPanel(item.match, item.legs) : '';
+    if (matchSummaryHtml && idx === filteredBets.findIndex(x=>x.matchLabel===item.matchLabel)) {
+      const summaryDiv = document.createElement('div');
+      summaryDiv.innerHTML = matchSummaryHtml;
+      cc.appendChild(summaryDiv);
+    }
     const conf=bet.confidence;
     const cc2=conf>=75?'#639922':conf>=65?'#BA7517':'#888780';
     const factors=bet.factors||'';
