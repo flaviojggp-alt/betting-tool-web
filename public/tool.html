@@ -49,7 +49,8 @@ input:focus, select:focus { border-color: #888; }
   .h2h-panel { overflow-x: auto; }
   .tab-bar { overflow-x: auto; -webkit-overflow-scrolling: touch; white-space: nowrap; padding-bottom: 4px; }
   .tab { font-size: 12px; padding: 6px 10px; }
-  .combo-card { padding: 10px 12px; }
+  .combo-card.value-bet { border-left-color: #185FA5 !important; background: linear-gradient(135deg, #EBF4FF 0%, #fff 100%) !important; }
+.combo-card { padding: 10px 12px; }
   .metric-card { padding: 8px 10px; }
   .fixture-card { padding: 8px 10px; }
   input[type=text], input[type=number] { font-size: 16px; }
@@ -1273,7 +1274,7 @@ function renderHistory(){
           <div style="font-size:13px;font-weight:600;margin:2px 0;">${b.market}</div>
           <div style="display:flex;gap:6px;margin-top:4px;">
             <span class="badge badge-blue">${b.odds.toFixed(2)}x</span>
-            <span class="badge badge-gray">${b.confidence}% conf.</span>
+            <span class="badge badge-gray">${bet.valueBet ? '<span style="background:#185FA5;color:#fff;font-size:10px;font-weight:700;padding:2px 6px;border-radius:10px;margin-right:4px;">VALUE +'+bet.edge+'%</span>' : ''}${b.confidence}% conf.</span>
             <span style="font-size:11px;color:#999;">${date}</span>
           </div>
         </div>
@@ -2031,6 +2032,35 @@ function calcBets(m){
     ? ' · Eliminatoria directa (juego mas cauteloso, mas tarjetas)'
     : isNeutralVenue ? ' · Campo neutral (sin ventaja de local)' : '';
 
+  // ── RACHA GOLEADORA ──────────────────────────────────────────────────────
+  // Analiza la consistencia goleadora reciente mas alla de la media
+  // Una racha de 5+ partidos marcando es una senal mas fuerte que el promedio
+  const calcStreak = function(stats, field) {
+    if (!stats?.recentMatches?.length) return { streak: 0, type: 'neutral' };
+    const recent = stats.recentMatches.slice(0, 8);
+    let scoringStreak = 0, blankStreak = 0;
+    for (var i = 0; i < recent.length; i++) {
+      if ((recent[i][field] || 0) > 0) { scoringStreak++; blankStreak = 0; }
+      else { blankStreak++; if (blankStreak >= 2) break; }
+    }
+    return {
+      streak: scoringStreak,
+      type: scoringStreak >= 4 ? 'hot' : scoringStreak >= 2 ? 'warm' : 'neutral'
+    };
+  };
+  const hGoalStreak = calcStreak(h, 'goals');
+  const aGoalStreak = calcStreak(a, 'goals');
+
+  // Ajuste por racha: equipo en racha caliente (+) o fria (-)
+  const streakGoalsAdj = (hGoalStreak.type === 'hot' ? 0.2 : hGoalStreak.type === 'warm' ? 0.1 : 0) +
+                         (aGoalStreak.type === 'hot' ? 0.2 : aGoalStreak.type === 'warm' ? 0.1 : 0);
+  const streakTag = (hGoalStreak.streak >= 4 || aGoalStreak.streak >= 4) ? ' Racha' : '';
+  const streakNote = hGoalStreak.streak >= 4
+    ? ' · ' + m.home.name + ' lleva ' + hGoalStreak.streak + ' partidos marcando'
+    : aGoalStreak.streak >= 4
+    ? ' · ' + m.away.name + ' lleva ' + aGoalStreak.streak + ' partidos marcando'
+    : '';
+
   // ── INDICE DE NECESIDAD DIFERENCIAL ──────────────────────────────────────
   // Mide cuanto NECESITA ganar cada equipo vs cuanto necesita el rival.
   // Un equipo con mucha necesidad tiende a: atacar mas, recibir mas goles,
@@ -2236,6 +2266,34 @@ function calcBets(m){
   const hXGtrend = hXGdata?.trend||'normal';
   const aXGtrend = aXGdata?.trend||'normal';
 
+  // ── DETECCION ALINEACION DEFENSIVA ──────────────────────────────────────
+  // Analiza la alineacion para detectar formaciones defensivas (5 defensas)
+  // que indican el equipo priorizara no encajar sobre atacar
+  const detectDefensiveFormation = function(lineups, teamId) {
+    if (!lineups) return { isDefensive: false, defenders: 0 };
+    const team = (lineups.home?.team?.id === teamId) ? lineups.home : lineups.away;
+    if (!team?.startXI) return { isDefensive: false, defenders: 0 };
+    const defenders = team.startXI.filter(function(p) {
+      const pos = (p.player?.pos || '').toUpperCase();
+      return pos === 'D' || pos === 'DEF' || pos === 'CB' || pos === 'LB' || pos === 'RB';
+    }).length;
+    return { isDefensive: defenders >= 5, defenders: defenders };
+  };
+
+  const hFormation = detectDefensiveFormation(m.lineups, m.home.id);
+  const aFormation = detectDefensiveFormation(m.lineups, m.away.id);
+
+  // Ajuste de goles: equipo con 5 defensas concede menos y ataca menos
+  const hDefFormationAdj = hFormation.isDefensive ? -0.3 : 0; // local defensivo: menos goles visitante
+  const aDefFormationAdj = aFormation.isDefensive ? -0.3 : 0; // visitante defensivo: menos goles local
+  const formationGoalsAdj = (hDefFormationAdj + aDefFormationAdj) / 2;
+  const formationTag = (hFormation.isDefensive || aFormation.isDefensive) ? ' 5Def' : '';
+  const formationNote = hFormation.isDefensive
+    ? ' · ' + m.home.name + ' juega con ' + hFormation.defenders + ' defensas'
+    : aFormation.isDefensive
+    ? ' · ' + m.away.name + ' juega con ' + aFormation.defenders + ' defensas'
+    : '';
+
   // ── VARIABLE DE SUERTE ─────────────────────────────────────────────────────
   // Mide si un equipo esta sobrerendiendo (con suerte) o subrendiendo (sin suerte)
   // frente a su xG. La suerte tiende a revertirse → ajusta confianza y goles esperados.
@@ -2283,6 +2341,14 @@ function calcBets(m){
   // Forma ponderada por recencia (decay exponencial)
   // Con muestra grande: 60% reciente + 40% historico
   // Con muestra pequeña: mas peso al historico (menos ruido)
+  // Calidad de rivales en el historial (ya ponderado por proxy via opponentTier)
+  // Agregar factor de calidad: si el equipo tiene buenos resultados vs rivales fuertes
+  const hOpponentTier = h.opponentTier || 'media';
+  const aOpponentTier = a.opponentTier || 'media';
+  // Si el historial es mayormente vs rivales debiles, reducir confianza en partido vs rival fuerte
+  const rivalQualityAdj = (hOpponentTier === 'debil' && a.teamRank && a.teamRank < 20) ? -4 :
+                          (hOpponentTier === 'fuerte' && a.teamRank && a.teamRank > 50) ? 3 : 0;
+
   const hSampleSize = h.global?.sampleSize || h.sampleSize || 0;
   const aSampleSize = a.global?.sampleSize || a.sampleSize || 0;
   const hRecentWeight = hSampleSize >= 8 ? 0.65 : hSampleSize >= 4 ? 0.50 : 0.30;
@@ -2304,7 +2370,7 @@ function calcBets(m){
   const aCtxGoals = isNeutralVenue ? aGoalsSafe : (a.isHomeContext!==null?aFormGoals:aGoalsSafe);
 
   // GOLES totales con todos los ajustes
-  const indGoals=((hCtxGoals*(1-hIP)+homeGoalsAdj+hDefAdj+hXGadj+hLuckGoalsAdj+hPressingGoalsAdj+aCtxGoals*(1-aIP)+awayGoalsAdj+aDefAdj+aXGadj+aLuckGoalsAdj+aPressingGoalsAdj)/2)+weatherGoalsAdj+refGoalsAdj+impGoalsAdj+playerGoalsAdj+necGoalsAdj+knockoutGoalsAdj+neutralVenueAdj;
+  const indGoals=((hCtxGoals*(1-hIP)+homeGoalsAdj+hDefAdj+hXGadj+hLuckGoalsAdj+hPressingGoalsAdj+aCtxGoals*(1-aIP)+awayGoalsAdj+aDefAdj+aXGadj+aLuckGoalsAdj+aPressingGoalsAdj)/2)+weatherGoalsAdj+refGoalsAdj+impGoalsAdj+playerGoalsAdj+necGoalsAdj+knockoutGoalsAdj+neutralVenueAdj+streakGoalsAdj+formationGoalsAdj;
   const ag=h2h?indGoals*W_IND+h2h.avgGoals*W_H2H:indGoals;
 
   // CÓRNERS
@@ -2443,6 +2509,86 @@ function calcBets(m){
     ? Math.round(poisBTTSConf*0.5 + (58+(af2-2.5)*4+bB)*0.5)
     : Math.min(90, 58+(af2-2.5)*4+bB);
   if(af2>=2.5&&ag>=2.0) bets.push({market:'Ambos equipos marcan',odds:1.85,confidence:Math.min(92,Math.max(35,bttsConf+(h2h&&h2h.bttsRate>=0.6?8:h2h&&h2h.bttsRate>=0.5?4:0)+(poisBTTSConf&&poisBTTSConf>55?5:0)+dixonColesAdj.btts)),factors:'FWD'+h2hTag+hvTag+poisTag+playerTag+injTag,reason:`Delanteros: ${af2.toFixed(1)} rem/pj${h2h?` · BTTS H2H:${Math.round(h2h.bttsRate*100)}%`:''}${poisBTTSConf?` · Poisson: ${poisBTTSConf}%`:''}${playerNote}`});
+
+  // ── MERCADO DE GOLEADOR INDIVIDUAL ──────────────────────────────────────
+  const hScorersData = m.homeScorers?.players || [];
+  const aScorersData = m.awayScorers?.players || [];
+
+  // Para cada goleador top, calcular probabilidad de anotar
+  // P(anotar) = golesPerGame × ajuste_defensa_rival × ajuste_necesidad
+  const rivalDefAdj = {elite: 0.6, solida: 0.8, media: 1.0, debil: 1.3};
+  const hRivalDefMult = rivalDefAdj[awayDefRating] || 1.0; // defensa del visitante
+  const aRivalDefMult = rivalDefAdj[homeDefRating] || 1.0; // defensa del local
+
+  // Goleadores del local
+  hScorersData.slice(0, 3).forEach(function(player) {
+    if (!player.goalsPerGame || player.goalsPerGame < 0.3) return;
+    const prob = Math.min(0.85, player.goalsPerGame * hRivalDefMult * (isKnockout ? 0.9 : 1.0));
+    const conf = Math.min(80, Math.round(prob * 100 + (necVictAdj > 0 ? 5 : 0)));
+    if (conf < 52) return;
+    // Fair odds: 1/prob, con margen de casa tipico del 10%
+    const fairOdds = +(Math.max(1.25, (1/prob) * 0.90)).toFixed(2);
+    bets.push({
+      market: player.name + ' anota',
+      odds: fairOdds,
+      confidence: conf,
+      factors: 'PLY +' + player.goals + 'goles' + (hRivalDefMult < 1 ? ' -Def' : hRivalDefMult > 1 ? ' +Def' : ''),
+      reason: player.name + ': ' + player.goalsPerGame + ' goles/pj en ' + player.games + ' partidos' +
+        (hRivalDefMult !== 1 ? ' · defensa rival ' + awayDefRating : '') +
+        (isKnockout ? ' · eliminatoria' : '')
+    });
+  });
+
+  // Goleadores del visitante
+  aScorersData.slice(0, 3).forEach(function(player) {
+    if (!player.goalsPerGame || player.goalsPerGame < 0.3) return;
+    const prob = Math.min(0.85, player.goalsPerGame * aRivalDefMult * (isKnockout ? 0.9 : 1.0));
+    const conf = Math.min(80, Math.round(prob * 100 + (necVictAdj < 0 ? 5 : 0)));
+    if (conf < 52) return;
+    const fairOdds = +(Math.max(1.25, (1/prob) * 0.90)).toFixed(2);
+    bets.push({
+      market: player.name + ' anota',
+      odds: fairOdds,
+      confidence: conf,
+      factors: 'PLY +' + player.goals + 'goles' + (aRivalDefMult < 1 ? ' -Def' : aRivalDefMult > 1 ? ' +Def' : ''),
+      reason: player.name + ': ' + player.goalsPerGame + ' goles/pj en ' + player.games + ' partidos' +
+        (aRivalDefMult !== 1 ? ' · defensa rival ' + homeDefRating : '') +
+        (isKnockout ? ' · eliminatoria' : '')
+    });
+  });
+
+  // ── RESULTADO AL DESCANSO (HT) ──────────────────────────────────────────
+  const hHalfGoals = m.homeGoalMin?.avgFirstHalfGoals || null;
+  const aHalfGoals = m.awayGoalMin?.avgFirstHalfGoals || null;
+  if (hHalfGoals !== null && aHalfGoals !== null) {
+    const htTotal = hHalfGoals + aHalfGoals;
+    const htConf = Math.min(80, Math.round(50 + Math.abs(htTotal - 1.0) * 15 + (hDefReliable && aDefReliable ? 5 : -3)));
+    if (htConf >= 54) {
+      if (htTotal >= 1.3) {
+        bets.push({
+          market: 'Mas de 0.5 goles primer tiempo',
+          odds: 1.65,
+          confidence: Math.min(80, htConf),
+          factors: 'HT +1T',
+          reason: m.home.name + ': ' + (hHalfGoals||0).toFixed(2) + ' goles/1T · ' +
+            m.away.name + ': ' + (aHalfGoals||0).toFixed(2) + ' goles/1T'
+        });
+      }
+      // HT resultado si hay dominancia clara
+      const hHalfRate = m.homeGoalMin?.firstHalfRate || 0.5;
+      const aHalfRate = m.awayGoalMin?.firstHalfRate || 0.5;
+      if (hHalfGoals > aHalfGoals * 1.5 && hHalfGoals >= 0.8 && m.odds.h <= 2.20) {
+        const htWinConf = Math.min(76, Math.round(55 + (hHalfGoals - aHalfGoals) * 15));
+        bets.push({
+          market: m.home.name + ' gana primer tiempo',
+          odds: +(m.odds.h * 1.35).toFixed(2),
+          confidence: htWinConf,
+          factors: 'HT +1T DOM',
+          reason: 'Local marca ' + hHalfGoals.toFixed(2) + ' goles/1T vs visitante ' + aHalfGoals.toFixed(2)
+        });
+      }
+    }
+  }
 
   // ── MERCADO DE CORNERS ───────────────────────────────────────────────────
   // Fórmula cruzada: promedia lo que genera cada equipo CON lo que concede el rival
@@ -2595,6 +2741,35 @@ function calcBets(m){
     }
   }
   if(predWH&&(!h2h||h2h.homeWinRate<0.6)&&m.odds.h<=2.20) bets.push({market:`Victoria ${m.home.name}`,odds:m.odds.h,confidence:Math.min(78,Math.max(40,60+pB+necVictAdj+eloVictAdj)),factors:'Pred'+necTag+tramiteTag+eloTag,reason:`API predice local (${pred.percent?.home||''})${necNote}${eloNote}`});
+
+  // ── DETECCION AUTOMATICA DE VALUE BETS ──────────────────────────────────
+  // Compara probabilidad del modelo vs probabilidad implicita del mercado
+  // Si el modelo da >5% mas que el mercado -> valor real identificado
+  if (m.oddsComparison?.found && m.oddsComparison.bestOdds?.length) {
+    m.oddsComparison.bestOdds.slice(0, 4).forEach(function(marketOdds) {
+      const impliedProb = marketOdds.price > 1 ? 1/marketOdds.price : 0;
+      const outcome = (marketOdds.outcome || '').toLowerCase();
+      // Buscar si tenemos una jugada equivalente
+      const matchingBet = bets.find(function(b) {
+        const bm = (b.market || '').toLowerCase();
+        return (outcome.includes('home') && bm.includes('victoria') && bm.includes(m.home.name.split(' ')[0].toLowerCase())) ||
+               (outcome.includes('away') && bm.includes('victoria') && bm.includes(m.away.name.split(' ')[0].toLowerCase())) ||
+               (outcome.includes('over 2.5') && bm.includes('2.5')) ||
+               (outcome.includes('btts') && bm.includes('ambos'));
+      });
+      if (matchingBet) {
+        const modelProb = matchingBet.confidence / 100;
+        const edge = modelProb - impliedProb;
+        if (edge >= 0.06) { // 6%+ de ventaja -> value bet confirmado
+          matchingBet.factors = (matchingBet.factors || '') + ' VALUE';
+          matchingBet.valueBet = true;
+          matchingBet.edge = Math.round(edge * 100);
+          matchingBet.bestOdds = marketOdds.price;
+          matchingBet.bestBook = marketOdds.bookmaker;
+        }
+      }
+    });
+  }
 
   // Aplicar retroalimentacion automatica de 4 niveles
   const leagueKey = m.league || '';
@@ -2970,7 +3145,7 @@ function renderResults(data){
       allAvailable.slice(0,4).forEach((item)=>{
         const bet=item.legs[0];
         const div=document.createElement('div');
-        div.className='combo-card';
+        div.className='combo-card' + (bet.valueBet ? ' value-bet' : '');
         div.style.opacity='0.6';
         div.style.borderLeft='3px solid #ddd';
         const inner = document.createElement('div');
@@ -3211,18 +3386,23 @@ function buildSimulationPanel(m) {
 function buildScorersPanel(m) {
   const hS = m.homeScorers, aS = m.awayScorers;
   if ((!hS || !hS.found) && (!aS || !aS.found)) return '';
-  const renderTeam = function(scorers, teamName) {
+  const renderTeam = function(scorers, teamName, rivalDefRating) {
     if (!scorers || !scorers.found || !scorers.players?.length) return '';
+    const defMult = {elite:0.6, solida:0.8, media:1.0, debil:1.3}[rivalDefRating] || 1.0;
     return '<div style="margin-bottom:10px;">'
       + '<p style="font-size:11px;font-weight:600;color:#555;text-transform:uppercase;letter-spacing:0.05em;margin-bottom:6px;">' + teamName + '</p>'
       + scorers.players.slice(0,5).map(function(p) {
+          const prob = Math.min(0.85, (p.goalsPerGame||0) * defMult);
+          const fairOdds = prob > 0.1 ? (1/prob * 0.90).toFixed(2) : '—';
+          const probPct = Math.round(prob * 100);
+          const probColor = probPct >= 60 ? '#3B6D11' : probPct >= 40 ? '#854F0B' : '#888';
           return '<div style="display:flex;align-items:center;gap:8px;padding:5px 0;border-bottom:0.5px solid #f5f5f0;">'
             + '<div style="flex:1;">'
             + '<span style="font-size:13px;color:#1a1a1a;">' + p.name + '</span>'
-            + '<span style="font-size:11px;color:#999;margin-left:4px;">' + p.games + ' partidos</span>'
+            + '<span style="font-size:11px;color:#999;margin-left:4px;">' + p.games + ' pj · ' + p.goals + ' goles</span>'
             + '</div>'
-            + '<span style="font-size:12px;font-weight:600;color:#185FA5;">' + p.goals + ' gol' + (p.goals!==1?'es':'') + '</span>'
-            + '<span style="font-size:11px;color:#888;min-width:60px;text-align:right;">' + p.goalsPerGame + ' g/pj</span>'
+            + '<span style="font-size:12px;font-weight:600;color:' + probColor + ';">' + probPct + '%</span>'
+            + '<span style="font-size:11px;color:#185FA5;min-width:44px;text-align:right;">~' + fairOdds + 'x</span>'
             + '</div>';
         }).join('')
       + '</div>';
