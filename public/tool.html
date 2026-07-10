@@ -1411,15 +1411,23 @@ function buildPoissonPanel(m){
 
 function buildMovementPanel(m){
   const mv=m.oddsMovement; if(!mv?.found) return '';
-  const mc=mv.marketConsensus;
+  if(!mv.movement || !mv.closing || !mv.opening){
+    return `<div style="background:#faf8ff;border:1px solid #e0d8f8;border-radius:8px;padding:10px 12px;margin-bottom:8px;">
+      <p class="section-label" style="margin-bottom:8px;">📊 Movimiento de cuotas</p>
+      <div style="font-size:11px;color:#999;">${mv.note || 'Sin snapshot de apertura disponible para este partido'}</div>
+    </div>`;
+  }
+  const cl=mv.closing, op=mv.opening, mvt=mv.movement;
+  const steamName = mvt.steamSide==='home' ? mv.home_team : mvt.steamSide==='away' ? mv.away_team : null;
   return `<div style="background:#faf8ff;border:1px solid #e0d8f8;border-radius:8px;padding:10px 12px;margin-bottom:8px;">
-    <p class="section-label" style="margin-bottom:8px;">📊 Consenso del mercado (${mc.bookmakerCount} casas)</p>
+    <p class="section-label" style="margin-bottom:8px;">📊 Movimiento de cuotas (${cl.odds.bookmakerCount} casas)</p>
     <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:6px;">
-      <span class="badge badge-green">${mv.home_team}: ${Math.round(mc.homeWinProb*100)}% (${mc.avgHomeOdds}x)</span>
-      <span class="badge badge-amber">Empate: ${Math.round(mc.drawProb*100)}% (${mc.avgDrawOdds}x)</span>
-      <span class="badge badge-red">${mv.away_team}: ${Math.round(mc.awayWinProb*100)}% (${mc.avgAwayOdds}x)</span>
+      <span class="badge badge-green">${mv.home_team}: ${Math.round(cl.impliedProb.home*100)}% (${cl.odds.home}x)</span>
+      ${cl.impliedProb.draw!==null?`<span class="badge badge-amber">Empate: ${Math.round(cl.impliedProb.draw*100)}% (${cl.odds.draw}x)</span>`:''}
+      <span class="badge badge-red">${mv.away_team}: ${Math.round(cl.impliedProb.away*100)}% (${cl.odds.away}x)</span>
     </div>
-    <div style="font-size:11px;color:#555;">Favorito del mercado: <strong>${mc.favorite}</strong></div>
+    <div style="font-size:11px;color:#555;">Apertura: ${Math.round(op.impliedProb.home*100)}%L / ${Math.round(op.impliedProb.away*100)}%V → Cierre: ${Math.round(cl.impliedProb.home*100)}%L / ${Math.round(cl.impliedProb.away*100)}%V</div>
+    ${mvt.isSignificant?`<div style="font-size:11px;color:#185FA5;font-weight:600;margin-top:4px;">⚡ Movimiento significativo hacia ${steamName} — posible dinero sharp</div>`:''}
   </div>`;
 }
 
@@ -1874,8 +1882,8 @@ async function runAnalysis(){
     m.awayXG = aXG.status==='fulfilled' ? aXG.value : null;
     m.oddsComparison = oddsComp.status==='fulfilled' ? oddsComp.value : null;
     m.oddsMovement = oddsMovement.status==='fulfilled' ? oddsMovement.value : null;
-    if (m.oddsMovement?.found && m.oddsMovement?.marketConsensus) {
-      m.lineMovementAlert = checkLineMovement(m.home.id + '-' + m.away.id, m.oddsMovement.marketConsensus);
+    if (m.oddsMovement?.found && m.oddsMovement?.closing?.impliedProb) {
+      m.lineMovementAlert = checkLineMovement(m.home.id + '-' + m.away.id, { homeWinProb: m.oddsMovement.closing.impliedProb.home });
     }
     m.oddsAsian = oddsAsian.status==='fulfilled' ? oddsAsian.value : null;
     m.homePlayerImpact = hPlayerImpact.status==='fulfilled' ? hPlayerImpact.value : null;
@@ -2181,13 +2189,14 @@ function calcBets(m){
   const poisNote = poisProb ? ` · Poisson: ${Math.round(poisProb.over25*100)}% prob. +2.5g` : '';
   const poisTag = pois ? ' +Pois' : '';
 
-  // Movimiento de cuotas — consenso del mercado
+  // Movimiento de cuotas — consenso del mercado (cierre = cuota mas reciente disponible)
   const movement = m.oddsMovement;
-  const marketFavorite = movement?.marketConsensus?.favorite||null;
-  const marketHomeProb = movement?.marketConsensus?.homeWinProb||null;
-  const marketAwayProb = movement?.marketConsensus?.awayWinProb||null;
-  const movNote = movement?.found ? ` · Mercado: ${Math.round((marketHomeProb||0)*100)}%L-${Math.round((movement?.marketConsensus?.drawProb||0)*100)}%E-${Math.round((marketAwayProb||0)*100)}%V` : '';
-  const movTag = movement?.found ? ' +Mov' : '';
+  const closingProb = movement?.closing?.impliedProb || null;
+  const marketFavorite = closingProb ? (closingProb.home > closingProb.away ? m.home.name : m.away.name) : null;
+  const marketHomeProb = closingProb ? closingProb.home : null;
+  const marketAwayProb = closingProb ? closingProb.away : null;
+  const movNote = (movement?.found && closingProb) ? ` · Mercado: ${Math.round((marketHomeProb||0)*100)}%L-${Math.round((closingProb.draw||0)*100)}%E-${Math.round((marketAwayProb||0)*100)}%V` : '';
+  const movTag = (movement?.found && closingProb) ? ' +Mov' : '';
 
   // Handicap asiático
   const asian = m.oddsAsian;
@@ -2207,7 +2216,7 @@ function calcBets(m){
       : (a.teamRank && h.teamRank ? h.teamRank - a.teamRank : 0);
     const xgAdv = asianLine < 0 ? (hXGdata?.avgXG||0)-(aXGdata?.avgXG||0) : (aXGdata?.avgXG||0)-(hXGdata?.avgXG||0);
     // Solo sugerir si el favorito del AH coincide con dominio estadistico
-    const ahAligned = rankAdv >= 3 || xgAdv >= 0.25 || (movement?.marketConsensus?.favorite === ahTeam);
+    const ahAligned = rankAdv >= 3 || xgAdv >= 0.25 || (marketFavorite === ahTeam);
     if (ahAligned) {
       const ahConf = Math.min(78, 58 + Math.abs(asianLine)*8 + (rankAdv>5?5:0) + (xgAdv>0.3?5:0) + (movement?.found?4:0));
       bets.push({
@@ -3114,6 +3123,7 @@ function generateCombos(matchData){
 
 function renderResults(data){
   const {bestPerMatch, combos} = data;
+  const ODDS_LIMIT = parseFloat(document.getElementById('odds-limit')?.value || 2.0);
   const mr=document.getElementById('metrics-row');
   const totalConf=bestPerMatch.length?Math.max(...bestPerMatch.map(b=>b.legs[0].confidence)).toFixed(0):'-';
   const bestCombo=combos.length?Math.max(...combos.map(c=>c.totalOdds)).toFixed(2):'-';
@@ -3473,8 +3483,8 @@ function buildExecutiveSummary(m, bets) {
   if (allFactors.includes('Lluvia')) warnings.push('Lluvia puede afectar el juego');
 
   // Calidad de datos
-  const hSample = m.stats?.home?.global?.sampleSize || 0;
-  const aSample = m.stats?.away?.global?.sampleSize || 0;
+  const hSample = m.stats?.home?.global?.sampleSize || m.stats?.home?.sampleSize || 0;
+  const aSample = m.stats?.away?.global?.sampleSize || m.stats?.away?.sampleSize || 0;
   const dataQuality = Math.min(hSample, aSample);
   const dataColor = dataQuality >= 8 ? '#3B6D11' : dataQuality >= 4 ? '#854F0B' : '#A32D2D';
   const dataLabel = dataQuality >= 8 ? 'Buena (' + dataQuality + ' partidos)' : dataQuality >= 4 ? 'Limitada (' + dataQuality + ' partidos)' : 'Insuficiente (' + dataQuality + ' partidos)';
@@ -3525,8 +3535,8 @@ function buildExecutiveSummary(m, bets) {
 // Muestra explícitamente qué tan confiables son los datos del análisis.
 function buildRiskPanel(m, bets) {
   const risks = [];
-  const hSample = m.stats?.home?.global?.sampleSize || 0;
-  const aSample = m.stats?.away?.global?.sampleSize || 0;
+  const hSample = m.stats?.home?.global?.sampleSize || m.stats?.home?.sampleSize || 0;
+  const aSample = m.stats?.away?.global?.sampleSize || m.stats?.away?.sampleSize || 0;
   if (hSample < 4) risks.push({ level: 'alto', msg: m.home.name + ' tiene menos de 4 partidos — estadisticas poco confiables' });
   if (aSample < 4) risks.push({ level: 'alto', msg: m.away.name + ' tiene menos de 4 partidos — estadisticas poco confiables' });
   if (!m.homeDefensive && !m.awayDefensive) risks.push({ level: 'medio', msg: 'Sin datos defensivos — corners y tarjetas usan estimaciones' });
