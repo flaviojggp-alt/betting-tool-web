@@ -1274,7 +1274,7 @@ function renderHistory(){
           <div style="font-size:13px;font-weight:600;margin:2px 0;">${b.market}</div>
           <div style="display:flex;gap:6px;margin-top:4px;">
             <span class="badge badge-blue">${b.odds.toFixed(2)}x</span>
-            <span class="badge badge-gray">${bet.valueBet ? '<span style="background:#185FA5;color:#fff;font-size:10px;font-weight:700;padding:2px 6px;border-radius:10px;margin-right:4px;">VALUE +'+bet.edge+'%</span>' : ''}${b.confidence}% conf.</span>
+            <span class="badge badge-gray">${b.valueBet ? '<span style="background:#185FA5;color:#fff;font-size:10px;font-weight:700;padding:2px 6px;border-radius:10px;margin-right:4px;">VALUE +'+b.edge+'%</span>' : ''}${b.confidence}% conf.</span>
             <span style="font-size:11px;color:#999;">${date}</span>
           </div>
         </div>
