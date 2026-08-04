@@ -159,7 +159,7 @@ input[type=range] { flex: 1; accent-color: #1a1a1a; height: 4px; }
         <div id="sb-status"><span style="font-size:12px;color:#854F0B;">Nube: no conectada</span></div>
         <div style="display:flex;gap:6px;">
           <button onclick="toggleSbForm()" class="btn-sec" style="font-size:13px;padding:10px 16px;min-height:44px;">Conectar</button>
-          <button onclick="syncLocalHistoryToCloud()" class="btn-sec" style="font-size:13px;padding:10px 16px;min-height:44px;">Sincronizar</button>
+          <button onclick="syncAllToCloud()" class="btn-sec" style="font-size:13px;padding:10px 16px;min-height:44px;">Sincronizar</button>
         </div>
       </div>
       <div id="sb-form" style="display:none;margin-top:10px;border-top:1px solid #f0f0f0;padding-top:10px;">
@@ -314,7 +314,7 @@ const LEAGUES = [
   { id: 96,  key: 'soccer_portugal_taca_de_portugal',label: 'Taça de Portugal',   flag: 'PT', cup: true },
   { id: 13,  key: 'soccer_conmebol_copa_sudamericana',label: 'Copa Sudamericana', flag: 'CA', cup: true },
   // Torneos Internacionales
-  { id: 1,  key: 'soccer_world_cup',       label: 'Mundial FIFA',      flag: 'WC', cup: true, intl: true },
+  { id: 1,  key: 'soccer_fifa_world_cup',  label: 'Mundial FIFA',      flag: 'WC', cup: true, intl: true },
   { id: 15, key: 'soccer_club_world_cup',  label: 'Mundial Clubes',    flag: 'CW', cup: true, intl: true },
   { id: 9,  key: 'soccer_copa_america',    label: 'Copa America',      flag: 'CA', cup: true, intl: true },
   { id: 5,  key: 'soccer_uefa_euro',       label: 'Eurocopa',          flag: 'EU', cup: true, intl: true },
@@ -367,6 +367,7 @@ async function initSupabase() {
       await _sb.auth.setSession(data.session);
       renderSupabaseStatus(true);
       showToast('Nube: reconectado como ' + _sbUser.email, 'success', 3000);
+      await loadEloFromCloud();
     } else {
       renderSupabaseStatus(false);
     }
@@ -416,6 +417,7 @@ async function sbLogin() {
     showToast('Conectado como ' + email, 'success', 4000);
     renderSupabaseStatus(true);
     await syncLocalHistoryToCloud();
+    await loadEloFromCloud();
   } catch(e) {
     showToast('Error de conexion: ' + e.message, 'error');
   }
@@ -503,6 +505,16 @@ async function syncLocalHistoryToCloud() {
   }
   showToast(synced + ' apuesta(s) sincronizadas con la nube', 'success', 4000);
 }
+
+// Sincroniza TODO lo que vive en localStorage hacia Supabase de un solo boton:
+// historial de apuestas, ratings ELO y transacciones de bankroll.
+async function syncAllToCloud() {
+  if (!_sb || !_sbUser) { showToast('Conecta la nube primero', 'warning'); return; }
+  await syncLocalHistoryToCloud();
+  await syncAllEloToCloud();
+  await syncAllBankrollTxToCloud();
+}
+
 
 // ── NOTIFICATIONS ─────────────────────────────────────────────────────────
 function showToast(msg, type, ms) {
@@ -931,6 +943,48 @@ function getBK(){
 
 function saveBK(bk){ try{ localStorage.setItem(BK_KEY, JSON.stringify(bk)); }catch(e){} }
 
+// ── SYNC DE TRANSACCIONES DE BANKROLL A SUPABASE ─────────────────────────────
+// Igual que con ELO: las transacciones (bet/return/deposit/withdraw) vivian
+// solo en localStorage. Se sincronizan a bankroll_transactions (columnas ya
+// definidas en supabase.ts: user_id, type, amount, match, market, created_at).
+// El campo local "withdraw" se mapea a "withdrawal" para coincidir con el tipo
+// declarado en el dashboard Next.js.
+async function syncBankrollTxToCloud(tx) {
+  if (!_sb || !_sbUser) return;
+  try {
+    const { data: sessionData } = await _sb.auth.getSession();
+    const token = sessionData?.session?.access_token;
+    if (!token) return;
+    const typeMap = { withdraw: 'withdrawal' };
+    await fetch(SUPABASE_URL + '/rest/v1/bankroll_transactions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'apikey': SUPABASE_KEY,
+        'Authorization': 'Bearer ' + token,
+        'Prefer': 'return=minimal',
+      },
+      body: JSON.stringify({
+        user_id: _sbUser.id,
+        type: typeMap[tx.type] || tx.type,
+        amount: tx.amount,
+        match: tx.match || null,
+        market: tx.market || null,
+        created_at: tx.date || new Date().toISOString(),
+      }),
+    });
+  } catch(e) { console.warn('Bankroll cloud sync failed:', e.message); }
+}
+
+async function syncAllBankrollTxToCloud() {
+  if (!_sb || !_sbUser) { showToast('Conecta la nube primero', 'warning'); return; }
+  const bk = getBK();
+  const txs = bk.transactions || [];
+  if (!txs.length) { showToast('No hay transacciones locales para sincronizar', 'info'); return; }
+  for (const tx of txs) { await syncBankrollTxToCloud(tx); }
+  showToast('Bankroll sincronizado (' + txs.length + ' transacciones)', 'success');
+}
+
 function getBetsToday(bk){
   const today = new Date().toDateString();
   return (bk.transactions||[]).filter(t => new Date(t.date).toDateString()===today && t.type==='bet');
@@ -969,6 +1023,7 @@ function placeBet(match, market, odds, confidence, amount){
   bk.current = +(bk.current - amount).toFixed(2);
   bk.transactions.unshift(tx);
   saveBK(bk);
+  syncBankrollTxToCloud(tx);
 
   // También registrar en historial de apuestas
   recordBet({match, market, odds, confidence}, sharedId);
@@ -985,7 +1040,9 @@ function settleBet(id, won){
   if (won) {
     const winAmount = +(tx.amount * tx.odds).toFixed(2);
     bk.current = +(bk.current + winAmount).toFixed(2);
-    bk.transactions.unshift({ id:Date.now(), date:new Date().toISOString(), type:'return', amount:winAmount, relatedId:id, match:tx.match, market:tx.market });
+    const returnTx = { id:Date.now(), date:new Date().toISOString(), type:'return', amount:winAmount, relatedId:id, match:tx.match, market:tx.market };
+    bk.transactions.unshift(returnTx);
+    syncBankrollTxToCloud(returnTx);
   }
   saveBK(bk);
   updateBetResult(tx.id, won?'win':'loss');
@@ -1025,16 +1082,20 @@ function settleBetPrompt(id, won) {
 function depositBK(amount){
   const bk = getBK();
   bk.current = +(bk.current + amount).toFixed(2);
-  bk.transactions.unshift({ id:Date.now(), date:new Date().toISOString(), type:'deposit', amount });
+  const tx = { id:Date.now(), date:new Date().toISOString(), type:'deposit', amount };
+  bk.transactions.unshift(tx);
   saveBK(bk);
+  syncBankrollTxToCloud(tx);
 }
 
 function withdrawBK(amount){
   const bk = getBK();
   if (amount > bk.current) return false;
   bk.current = +(bk.current - amount).toFixed(2);
-  bk.transactions.unshift({ id:Date.now(), date:new Date().toISOString(), type:'withdraw', amount });
+  const tx = { id:Date.now(), date:new Date().toISOString(), type:'withdraw', amount };
+  bk.transactions.unshift(tx);
   saveBK(bk);
+  syncBankrollTxToCloud(tx);
   return true;
 }
 
@@ -1292,12 +1353,26 @@ function renderHistory(){
   }).join('');
 }
 
-function buildKellyEVPanel(bet, matchLabel, matchData){
+function buildKellyEVPanel(bet, matchLabel, matchData, siblingRank){
   const bk = getBK();
   const bankroll = bk.current;
   const currency = bk.currency || 'S/';
   const safeId = 'betamt_' + Math.random().toString(36).slice(2,8);
   const kelly = kellyBet(bet.confidence, bet.odds, bankroll);
+
+  // Ajuste de Kelly correlacionado: si esta es la 2da (o mas) jugada sugerida
+  // para el MISMO partido, no son apuestas independientes -- ambas dependen
+  // del mismo resultado subyacente. Apostar el half-Kelly completo en cada
+  // una sobreestima el tamano optimo combinado del bankroll expuesto a un
+  // solo evento. Se aplica un descuento progresivo por cada jugada adicional
+  // del mismo partido (approximacion simple, no un Kelly multivariado completo).
+  const rank = siblingRank || 1;
+  const correlationDiscount = rank > 1 ? Math.pow(0.7, rank - 1) : 1;
+  const adjustedHalfKelly = +(kelly.halfKelly * correlationDiscount).toFixed(1);
+  const adjustedAmount = +(kelly.suggestedAmount * correlationDiscount).toFixed(2);
+  const correlationNote = rank > 1
+    ? `<div style="font-size:9px;color:#854F0B;margin-top:1px;">Ajustado ${Math.round((1-correlationDiscount)*100)}% por correlacion con otra jugada del mismo partido</div>`
+    : '';
 
   // Buscar mejor cuota real en odds comparison
   let bestRealOdds = null, bestBookmaker = null;
@@ -1324,9 +1399,10 @@ function buildKellyEVPanel(bet, matchLabel, matchData){
 
   return `<div style="border-top:1px solid #f0f0f0;margin-top:8px;padding-top:8px;display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;">
     <div style="background:#f5f5f0;border-radius:6px;padding:6px 8px;text-align:center;">
-      <div style="font-size:10px;color:#999;margin-bottom:2px;">Kelly sugerido</div>
-      <div style="font-size:14px;font-weight:700;">${kelly.halfKelly}%</div>
-      <div style="font-size:11px;color:#185FA5;font-weight:600;">${currency} ${kelly.suggestedAmount.toFixed(2)}</div>
+      <div style="font-size:10px;color:#999;margin-bottom:2px;" title="Se usa la mitad del Kelly completo para reducir la varianza del bankroll">½ Kelly sugerido</div>
+      <div style="font-size:14px;font-weight:700;">${adjustedHalfKelly}%</div>
+      <div style="font-size:11px;color:#185FA5;font-weight:600;">${currency} ${adjustedAmount.toFixed(2)}</div>
+      ${correlationNote}
     </div>
     <div style="background:#f5f5f0;border-radius:6px;padding:6px 8px;text-align:center;">
       <div style="font-size:10px;color:#999;margin-bottom:2px;">Valor esperado</div>
@@ -1828,6 +1904,17 @@ async function runAnalysis(){
   var pw=document.getElementById('analysis-progress-wrap'); if(pw) pw.style.display='block';
   updateProgressBar(5,'Iniciando analisis...');
   btn.innerHTML='<span class="spinner"></span>Analizando...';
+
+  // Registrar los partidos en la watchlist del proxy para alertas proactivas
+  // de movimiento de linea (Telegram). Si el proxy no tiene Telegram
+  // configurado, este registro no hace nada dañino (el cron simplemente no corre).
+  valid.forEach(m => {
+    fetch(PROXY() + '/watchlist/add', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ fixtureId: m.fixtureId, home: m.home.name, away: m.away.name, sport: m.league }),
+    }).catch(function(){});
+  });
 
   await Promise.all(valid.map(async m => {
     // Stats con contexto local/visitante y forma ponderada
@@ -2833,6 +2920,59 @@ function getTeamElo(teamId) {
   return ratings[teamId] || ELO_DEFAULT;
 }
 
+// ── SYNC DE ELO A SUPABASE ───────────────────────────────────────────────────
+// El ELO vivia solo en localStorage -- se perdia al cambiar de dispositivo o
+// limpiar el navegador. Estas funciones lo sincronizan a la tabla elo_ratings
+// (requiere que la tabla exista con columnas: user_id uuid, team_id bigint,
+// rating numeric, updated_at timestamptz, PRIMARY KEY (user_id, team_id), y
+// el GRANT correspondiente para el rol authenticated).
+async function syncEloToCloud(teamId, rating) {
+  if (!_sb || !_sbUser) return;
+  try {
+    const { data: sessionData } = await _sb.auth.getSession();
+    const token = sessionData?.session?.access_token;
+    if (!token) return;
+    await fetch(SUPABASE_URL + '/rest/v1/elo_ratings', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'apikey': SUPABASE_KEY,
+        'Authorization': 'Bearer ' + token,
+        'Prefer': 'return=minimal,resolution=merge-duplicates',
+        'On-Conflict': 'user_id,team_id',
+      },
+      body: JSON.stringify({ user_id: _sbUser.id, team_id: teamId, rating: rating, updated_at: new Date().toISOString() }),
+    });
+  } catch(e) { console.warn('ELO cloud sync failed:', e.message); }
+}
+
+async function loadEloFromCloud() {
+  if (!_sb || !_sbUser) return;
+  try {
+    const { data: sessionData } = await _sb.auth.getSession();
+    const token = sessionData?.session?.access_token;
+    if (!token) return;
+    const res = await fetch(SUPABASE_URL + '/rest/v1/elo_ratings?user_id=eq.' + _sbUser.id, {
+      headers: { 'apikey': SUPABASE_KEY, 'Authorization': 'Bearer ' + token },
+    });
+    if (!res.ok) return; // tabla puede no existir todavia -- fallar en silencio
+    const rows = await res.json();
+    if (!Array.isArray(rows) || !rows.length) return;
+    const local = getEloRatings();
+    rows.forEach(function(r) { local[r.team_id] = r.rating; });
+    saveEloRatings(local);
+  } catch(e) { console.warn('ELO cloud load failed:', e.message); }
+}
+
+async function syncAllEloToCloud() {
+  if (!_sb || !_sbUser) { showToast('Conecta la nube primero', 'warning'); return; }
+  const ratings = getEloRatings();
+  const ids = Object.keys(ratings);
+  if (!ids.length) { showToast('No hay ratings ELO locales para sincronizar', 'info'); return; }
+  for (const id of ids) { await syncEloToCloud(id, ratings[id]); }
+  showToast('ELO sincronizado (' + ids.length + ' equipos)', 'success');
+}
+
 // Actualiza Elo de dos equipos tras un resultado conocido del H2H
 function updateElo(homeId, awayId, result, homeGoals, awayGoals) {
   const ratings = getEloRatings();
@@ -2845,6 +2985,8 @@ function updateElo(homeId, awayId, result, homeGoals, awayGoals) {
   ratings[homeId] = Math.round(rH + delta);
   ratings[awayId] = Math.round(rA - delta);
   saveEloRatings(ratings);
+  syncEloToCloud(homeId, ratings[homeId]);
+  syncEloToCloud(awayId, ratings[awayId]);
 }
 
 // Convierte diferencia de Elo en probabilidad de victoria
@@ -2896,6 +3038,19 @@ function getCalibrationAdj() {
   });
   if (!count) return 0;
   return Math.max(-8, Math.min(8, Math.round((totalBias/count) * 40)));
+}
+
+// Version "plot" de la calibracion: devuelve el detalle por banda
+// (predicho vs real) para poder graficarlo, en vez de solo el ajuste agregado.
+function getCalibrationPlotData() {
+  const h = getHistory().filter(function(b){ return b.result !== 'pending'; });
+  const bands = [{min:50,max:60},{min:60,max:70},{min:70,max:80},{min:80,max:90},{min:90,max:100}];
+  return bands.map(function(band) {
+    const inBand = h.filter(function(b){ return (b.confidence||70) >= band.min && (b.confidence||70) < band.max; });
+    const predicted = (band.min + band.max) / 2;
+    const real = inBand.length ? (inBand.filter(function(b){ return b.result==='win'; }).length / inBand.length) * 100 : null;
+    return { min: band.min, max: band.max, predicted: predicted, real: real, n: inBand.length };
+  });
 }
 
 // ── NIVEL 2: Calibracion por tipo de mercado ─────────────────────────────────
@@ -3212,7 +3367,7 @@ function renderResults(data){
         </div>
       </div>
       <div class="conf-bar"><div class="conf-fill" style="width:${conf}%;background:${cc2};"></div></div>
-      ${buildKellyEVPanel(bet, item.matchLabel, item.matchObj)}`;
+      ${buildKellyEVPanel(bet, item.matchLabel, item.matchObj, item.rank)}`;
     cc.appendChild(div);
   });
 
@@ -3489,6 +3644,45 @@ function buildExecutiveSummary(m, bets) {
   const dataColor = dataQuality >= 8 ? '#3B6D11' : dataQuality >= 4 ? '#854F0B' : '#A32D2D';
   const dataLabel = dataQuality >= 8 ? 'Buena (' + dataQuality + ' partidos)' : dataQuality >= 4 ? 'Limitada (' + dataQuality + ' partidos)' : 'Insuficiente (' + dataQuality + ' partidos)';
 
+  // Comparacion contra la linea de Pinnacle (si esta disponible -- requiere
+  // tier Business de The Odds API). Pinnacle es el benchmark de "linea
+  // eficiente" del mercado profesional; comparar tu modelo contra su
+  // consenso de casas retail (que suele tener mas margen) da una senal mas
+  // limpia de si realmente hay valor o si solo estas viendo el margen de la casa.
+  let pinnacleCompareLine = '';
+  const pinnacleOdds = m.oddsComparison?.pinnacleLine;
+  if (pinnacleOdds && (pinnacleOdds.home || pinnacleOdds.away)) {
+    const invH = pinnacleOdds.home ? 1/pinnacleOdds.home : 0;
+    const invA = pinnacleOdds.away ? 1/pinnacleOdds.away : 0;
+    const invD = pinnacleOdds.draw ? 1/pinnacleOdds.draw : 0;
+    const totalInv = invH + invA + invD;
+    const homeBet = bets.find(function(b){ return b.market === ('Victoria ' + m.home.name); });
+    const awayBet = bets.find(function(b){ return b.market === ('Victoria ' + m.away.name); });
+    const compareOne = function(bet, inv) {
+      if (!bet || !inv || !totalInv) return null;
+      const pinProb = (inv/totalInv) * 100;
+      return { gap: bet.confidence - pinProb, pinProb: pinProb, betMarket: bet.market };
+    };
+    const cmp = compareOne(homeBet, invH) || compareOne(awayBet, invA);
+    if (cmp) {
+      const gapColor = cmp.gap >= 3 ? '#3B6D11' : cmp.gap <= -3 ? '#A32D2D' : '#854F0B';
+      pinnacleCompareLine = '<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;padding:6px 10px;background:#f5f5f0;border-radius:6px;">'
+        + '<span style="font-size:11px;color:#888;">Modelo vs Pinnacle (' + cmp.betMarket + '):</span>'
+        + '<span style="font-size:11px;font-weight:600;color:' + gapColor + ';">' + (cmp.gap>=0?'+':'') + cmp.gap.toFixed(1) + ' pts (Pinnacle: ' + cmp.pinProb.toFixed(0) + '%)</span>'
+        + '</div>';
+    }
+  }
+
+  // Se muestra aqui (no solo en la pestana Pro) porque es la metrica que
+  // realmente predice si tienes ventaja estructural sobre el mercado.
+  const clvStats = getCLVStats();
+  const clvLine = clvStats.hasData
+    ? '<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;padding:6px 10px;background:#f5f5f0;border-radius:6px;">'
+      + '<span style="font-size:11px;color:#888;">Tu CLV historico:</span>'
+      + '<span style="font-size:11px;font-weight:600;color:' + (clvStats.avgCLV>=0?'#3B6D11':'#A32D2D') + ';">' + (clvStats.avgCLV>=0?'+':'') + clvStats.avgCLV.toFixed(1) + '% (' + clvStats.n + ' registros)</span>'
+      + '</div>'
+    : '';
+
   // Top jugadas con EV
   const topBetsHtml = topBets.map(function(b) {
     const ev = +((b.confidence/100 * b.odds - 1) * 100).toFixed(1);
@@ -3516,6 +3710,8 @@ function buildExecutiveSummary(m, bets) {
     + '<span style="font-size:11px;color:#888;">Calidad de datos:</span>'
     + '<span style="font-size:11px;font-weight:500;color:' + dataColor + ';">' + dataLabel + '</span>'
     + '</div>'
+    + clvLine
+    + pinnacleCompareLine
     // Signals
     + (signals.length ? '<div style="margin-bottom:8px;"><span style="font-size:11px;color:#3B6D11;font-weight:500;">A favor: </span>'
     + signals.map(function(s){ return '<span style="font-size:11px;background:#EAF3DE;color:#3B6D11;padding:1px 7px;border-radius:10px;margin-right:4px;">' + s + '</span>'; }).join('')
@@ -3835,12 +4031,39 @@ function checkLineMovement(matchKey, currentConsensus) {
 }
 
 // ── RENDER: PESTANA ANALISIS PRO ───────────────────────────────────────────
+// Grafico simple de calibracion: predicho vs real por banda de confianza.
+// Barras horizontales -- mas facil de leer en mobile que un scatter plot.
+function buildCalibrationChart() {
+  const data = getCalibrationPlotData().filter(function(d){ return d.n > 0; });
+  if (!data.length) return '';
+  const rows = data.map(function(d) {
+    const realPct = d.real == null ? 0 : d.real;
+    const diff = d.real == null ? null : (d.real - d.predicted);
+    const diffColor = diff == null ? '#999' : diff >= 0 ? '#3B6D11' : '#A32D2D';
+    return '<div style="margin-bottom:8px;">'
+      + '<div style="display:flex;justify-content:space-between;font-size:10px;color:#888;margin-bottom:2px;">'
+      + '<span>' + d.min + '-' + d.max + '% (n=' + d.n + ')</span>'
+      + '<span style="color:' + diffColor + ';">' + (diff==null?'sin datos':(diff>=0?'+':'')+diff.toFixed(0)+' pts') + '</span>'
+      + '</div>'
+      + '<div style="position:relative;height:14px;background:#f0f0f0;border-radius:4px;overflow:hidden;">'
+      + '<div style="position:absolute;left:' + d.predicted + '%;top:0;bottom:0;width:2px;background:#999;"></div>'
+      + '<div style="height:100%;width:' + realPct + '%;background:' + diffColor + ';opacity:0.6;border-radius:4px;"></div>'
+      + '</div></div>';
+  }).join('');
+  return '<div class="card" style="margin-bottom:10px;">'
+    + '<p class="section-label">Calibracion: confianza predicha vs. acierto real</p>'
+    + '<p style="font-size:11px;color:#999;margin-bottom:10px;">La barra de color es tu tasa de acierto real; la linea gris es lo que el modelo predijo para esa banda. Barra mas corta que la linea = el modelo esta siendo optimista en esa banda.</p>'
+    + rows
+    + '</div>';
+}
+
 function renderProAnalysis() {
   const c = document.getElementById('pro-content');
   const bt = runBacktest();
   const clv = getCLVStats();
 
   let html = '';
+  html += buildCalibrationChart();
 
   // ── Retroalimentacion automatica ──────────────────────────────────────────
   var hAll = getHistory().filter(function(b){ return b.result !== 'pending'; });
@@ -4024,13 +4247,15 @@ async function renderToday() {
       try {
         const d = await get('/fixtures/upcoming?leagueId=' + league.id);
         if (!d.fixtures || !d.fixtures.length) return [];
-        // Filter fixtures within next 24 hours (using UTC timestamps to avoid timezone issues)
+        // Filter fixtures within next 48 hours (using UTC timestamps to avoid timezone issues)
+        // Ampliado de 24h a 48h: partidos de eliminatoria/torneos internacionales
+        // suelen revisarse con mas de un dia de anticipacion.
         const nowMs = Date.now();
-        const in24h = nowMs + 24*60*60*1000;
+        const in48h = nowMs + 48*60*60*1000;
         return d.fixtures
           .filter(function(f) {
             const fMs = new Date(f.date).getTime();
-            return fMs >= nowMs - 3*60*60*1000 && fMs <= in24h; // desde hace 3h hasta 24h adelante
+            return fMs >= nowMs - 3*60*60*1000 && fMs <= in48h; // desde hace 3h hasta 48h adelante
           })
           .map(function(f) {
             return Object.assign({}, f, { league: league, priority: LEAGUE_PRIORITY[league.id] || 99 });
@@ -4058,7 +4283,7 @@ async function renderToday() {
 
   // Render
   let html = '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;flex-wrap:wrap;gap:8px;">'
-    + '<p style="font-size:13px;color:#555;">' + allFixtures.length + ' partido(s) en las proximas 24 horas</p>'
+    + '<p style="font-size:13px;color:#555;">' + allFixtures.length + ' partido(s) en las proximas 48 horas</p>'
     + '<button onclick="showAddLeagueForm()" class="btn-sec" style="font-size:12px;padding:6px 12px;">+ Agregar liga</button>'
     + '</div>';
 
