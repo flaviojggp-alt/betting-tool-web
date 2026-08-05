@@ -3177,8 +3177,12 @@ function generateCombos(matchData){
 
   const bestPerMatch = [];
   allBets.forEach(mb => {
-    const calibAdj = getCalibrationAdj();
-    const validBets = mb.bets.map(b => calibAdj !== 0 ? {...b, confidence: Math.min(95, Math.max(40, b.confidence + calibAdj))} : b).filter(b=>b&&b.market);
+    // BUGFIX: calcBets() ya aplica el ajuste de calibracion de 4 niveles
+    // (incluyendo este mismo getCalibrationAdj) a cada apuesta antes de
+    // devolverla -- ver applyFeedbackAdj() al final de calcBets(). Volver a
+    // sumar calibAdj aqui contaba el nivel 1 DOS VECES, exagerando el ajuste
+    // historico (hasta el doble del maximo real de +/-8 puntos).
+    const validBets = mb.bets.filter(b=>b&&b.market);
 
     // REGLA 1: Si el promedio de goles es sospechosamente bajo (<0.8),
     // descartar mercados de goles — los datos son incorrectos
