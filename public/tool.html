@@ -2710,11 +2710,18 @@ function calcBets(m){
       });
     }
   } else if (totalCorners <= 7.5 && totalCorners > 0) {
-    const cornersConf = Math.min(80, Math.round(50 + (7.5 - totalCorners) * 10 + (hDefReliable && aDefReliable ? 5 : -5)));
+    // BUGFIX: antes esto SIEMPRE mostraba "Menos de 8.5 corners" sin importar
+    // el valor real de totalCorners, mientras la confianza se calculaba contra
+    // un umbral fijo de 7.5 -- la etiqueta no coincidia con lo que el modelo
+    // realmente evaluaba. Ahora la linea escala igual que en el mercado "Mas
+    // de", evitando que el mismo texto aparezca en partidos con perfiles de
+    // corners muy distintos.
+    const cornersLine = totalCorners <= 5.0 ? 6.5 : totalCorners <= 6.0 ? 7.5 : 8.5;
+    const cornersConf = Math.min(80, Math.round(50 + (cornersLine - totalCorners) * 10 + (hDefReliable && aDefReliable ? 5 : -5)));
     if (cornersConf >= 52) {
       bets.push({
-        market: 'Menos de 8.5 corners',
-        odds: 1.85,
+        market: `Menos de ${cornersLine} corners`,
+        odds: cornersLine <= 6.5 ? 2.05 : cornersLine <= 7.5 ? 1.95 : 1.85,
         confidence: cornersConf,
         factors: 'COR',
         reason: `${m.home.name}: ${hCornersSafe.toFixed(1)} · ${m.away.name}: ${aCornersSafe.toFixed(1)} corners/pj (total ${totalCorners.toFixed(1)}, partido cerrado)`
