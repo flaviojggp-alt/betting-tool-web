@@ -956,11 +956,37 @@ function getBK(){
     maxBetsPerDay: 3, maxBetAmount: 10, minBetAmount: 2,
     alertThreshold: 20, // alerta si baja de este monto
     transactions: [],
+    monthlyTargetPct: null, // objetivo de ROI mensual en % -- null hasta que el usuario lo defina
     settings: { bookmaker: 'Bet365', strategy: 'halfKelly' }
   }; } catch(e) { return null; }
 }
 
 function saveBK(bk){ try{ localStorage.setItem(BK_KEY, JSON.stringify(bk)); }catch(e){} }
+
+// ── PROGRESO MENSUAL ─────────────────────────────────────────────────────
+// ROI realizado (solo apuestas ya resueltas, no pendientes) del mes en curso,
+// vs. un objetivo de % mensual que el usuario define. Se usa % en vez de un
+// monto fijo en soles porque escala correctamente con el tamano de la banca
+// -- un objetivo en soles fijos se vuelve irreal o trivial segun crezca o
+// baje la banca.
+function getMonthlyProgress(bk) {
+  const now = new Date();
+  const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+  const resolved = (bk.transactions||[]).filter(function(t){
+    return t.type === 'bet' && (t.status === 'won' || t.status === 'lost') && new Date(t.date) >= monthStart;
+  });
+  const staked = resolved.reduce(function(s,t){ return s + t.amount; }, 0);
+  const returned = resolved.reduce(function(s,t){ return s + (t.status==='won' ? t.amount*t.odds : 0); }, 0);
+  const roi = staked > 0 ? +((returned-staked)/staked*100).toFixed(1) : 0;
+  return { roi: roi, staked: staked, returned: returned, count: resolved.length, monthLabel: now.toLocaleDateString('es', {month:'long', year:'numeric'}) };
+}
+
+function setMonthlyTarget(pct) {
+  const bk = getBK();
+  bk.monthlyTargetPct = pct;
+  saveBK(bk);
+  renderBankroll();
+}
 
 // ── SYNC DE TRANSACCIONES DE BANKROLL A SUPABASE ─────────────────────────────
 // Igual que con ELO: las transacciones (bet/return/deposit/withdraw) vivian
@@ -1185,10 +1211,27 @@ function getClosingOddsForBet(market, closingLines, homeTeam, awayTeam) {
   return null; // corners/tarjetas/otros mercados -- sin soporte automatico todavia
 }
 
+// Wrapper usado desde Historial: la mayoria de apuestas tienen una
+// transaccion de Banca asociada (mismo id) y deben liquidarse por el camino
+// completo (settleBetPrompt: saldo + CLV). Pero las registradas via el boton
+// "+ Registrar jugada" (recordBetFromUI) no generan transaccion de Banca, asi
+// que para esas se conserva el comportamiento anterior (solo actualizar Historial).
+function settleFromHistory(id, won) {
+  const bk = getBK();
+  const hasTx = (bk.transactions||[]).some(function(t){ return t.id===id; });
+  if (hasTx) {
+    settleBetPrompt(id, won);
+  } else {
+    updateBetResult(id, won?'win':'loss');
+    renderHistory();
+  }
+}
+
 async function settleBetPrompt(id, won) {
   const ok = settleBet(id, won);
   if (!ok) return;
   renderBankroll();
+  if (document.getElementById('history-stats')) renderHistory();
   const bk = getBK();
   const tx = (bk.transactions||[]).find(function(t){ return t.id===id; });
   const openOdds = tx ? tx.odds : null;
@@ -1292,6 +1335,38 @@ function renderBankroll(){
 
     ${bk.current < bk.alertThreshold ? `<div style="background:#FCEBEB;border:1px solid #f5c0c0;border-radius:8px;padding:10px 14px;margin-bottom:10px;font-size:13px;color:#A32D2D;">! Saldo por debajo del umbral de alerta (${bk.currency}${bk.alertThreshold}). Considera reducir el monto por apuesta.</div>` : ''}
 
+    <!-- PROGRESO MENSUAL -->
+    ${(function(){
+      const mp = getMonthlyProgress(bk);
+      const hasTarget = bk.monthlyTargetPct != null;
+      if (!hasTarget) {
+        return `<div style="background:#fff;border:1px solid #e5e5e5;border-radius:12px;padding:1rem;margin-bottom:10px;">
+          <p class="section-label" style="margin-bottom:8px;">Progreso mensual</p>
+          <p style="font-size:12px;color:#999;margin-bottom:10px;">Aún no defines un objetivo de ROI mensual. Con ${mp.count} apuesta(s) resuelta(s) este mes, todavía no hay suficiente historial para sugerir un % realista -- define uno provisional (ej. 10-15%) y ajústalo cuando tengas más datos.</p>
+          <div style="display:flex;gap:8px;">
+            <input type="number" id="monthly-target-input" placeholder="Ej. 12" style="flex:1;padding:8px;border:1px solid #ddd;border-radius:6px;font-size:13px;">
+            <button onclick="const v=parseFloat(document.getElementById('monthly-target-input').value);if(v>0)setMonthlyTarget(v);" style="background:#1a1a1a;color:#fff;border:none;border-radius:6px;padding:8px 16px;font-size:13px;cursor:pointer;">% Definir</button>
+          </div>
+        </div>`;
+      }
+      const pct = Math.min(150, Math.max(0, (mp.roi/bk.monthlyTargetPct)*100));
+      const roiColor = mp.roi>=bk.monthlyTargetPct ? '#3B6D11' : mp.roi>=0 ? '#854F0B' : '#A32D2D';
+      return `<div style="background:#fff;border:1px solid #e5e5e5;border-radius:12px;padding:1rem;margin-bottom:10px;">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
+          <p class="section-label" style="margin-bottom:0;">Progreso mensual (${mp.monthLabel})</p>
+          <button onclick="const v=prompt('Nuevo objetivo de ROI mensual (%)', ${bk.monthlyTargetPct});if(v&&parseFloat(v)>0)setMonthlyTarget(parseFloat(v));" style="font-size:11px;color:#999;background:none;border:none;cursor:pointer;text-decoration:underline;">editar objetivo</button>
+        </div>
+        <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:6px;">
+          <span style="font-size:22px;font-weight:800;color:${roiColor};">${mp.roi>=0?'+':''}${mp.roi}%</span>
+          <span style="font-size:13px;color:#999;">objetivo: ${bk.monthlyTargetPct}%</span>
+        </div>
+        <div style="background:#f0f0f0;border-radius:4px;height:8px;">
+          <div style="width:${Math.max(0,pct)}%;height:100%;background:${roiColor};border-radius:4px;"></div>
+        </div>
+        <p style="font-size:11px;color:#999;margin-top:6px;">${mp.count} apuesta(s) resuelta(s) este mes · ${bk.currency}${mp.staked.toFixed(2)} apostado</p>
+      </div>`;
+    })()}
+
     <!-- EXPOSICION TOTAL -- suma TODAS las pendientes, no solo las de hoy.
          Util para gestion profesional: saber cuanto % de la banca esta en
          riesgo en este momento, sumando partidos de todas las competiciones. -->
@@ -1336,9 +1411,38 @@ function renderBankroll(){
       <!-- Verificacion automatica de resultados pendientes (todas, no solo hoy) -->
       <button onclick="checkPendingBets()" class="btn-sec" style="width:100%;margin-bottom:14px;font-size:13px;padding:10px;">🔎 Verificar resultados pendientes</button>
 
+      <!-- TODAS las pendientes (no solo hoy) -- BUGFIX: antes solo se veian y
+           podian liquidarse las de HOY. Las de dias anteriores quedaban
+           atrapadas: aparecian en "Exposicion total" pero no habia forma de
+           liquidarlas desde Banca (solo existian en Historial, que usa
+           updateBetResult() y NUNCA toca el saldo ni pide cuota de cierre). -->
+      ${(function(){
+        const todayIds = new Set(todayBets.map(function(t){ return t.id; }));
+        const olderPending = (bk.transactions||[]).filter(function(t){ return t.status==='pending' && !todayIds.has(t.id); })
+          .sort(function(a,b){ return new Date(a.date)-new Date(b.date); });
+        if (!olderPending.length) return '';
+        return `<p class="section-label" style="margin-bottom:6px;margin-top:14px;">Pendientes de días anteriores (${olderPending.length})</p>
+        <div style="max-height:340px;overflow-y:auto;border:1px solid #f0f0f0;border-radius:8px;">
+          ${olderPending.map(function(t){
+            const d = new Date(t.date);
+            const dateLabel = d.toLocaleDateString('es', {day:'2-digit',month:'short'});
+            return `<div style="display:flex;justify-content:space-between;align-items:center;padding:7px 10px;border-bottom:1px solid #f5f5f0;font-size:12px;">
+              <div>
+                <div style="font-weight:600;">${t.market}</div>
+                <div style="color:#999;">${t.match} · ${t.odds}x · ${bk.currency}${t.amount} · ${dateLabel}</div>
+              </div>
+              <div style="display:flex;gap:4px;">
+                <button onclick="settleBetPrompt(${t.id},true)" style="font-size:11px;background:#EAF3DE;color:#3B6D11;border:none;border-radius:5px;padding:3px 8px;cursor:pointer;">✓ Ganó</button>
+                <button onclick="settleBetPrompt(${t.id},false)" style="font-size:11px;background:#FCEBEB;color:#A32D2D;border:none;border-radius:5px;padding:3px 8px;cursor:pointer;">✗ Perdió</button>
+              </div>
+            </div>`;
+          }).join('')}
+        </div>`;
+      })()}
+
       <!-- Apuestas de hoy -->
       ${todayBets.length ? `
-        <p class="section-label" style="margin-bottom:6px;">Apuestas de hoy</p>
+        <p class="section-label" style="margin-bottom:6px;margin-top:14px;">Apuestas de hoy</p>
         ${todayBets.map(t=>`
           <div style="display:flex;justify-content:space-between;align-items:center;padding:7px 0;border-bottom:1px solid #f5f5f0;font-size:12px;">
             <div>
@@ -1547,8 +1651,8 @@ function renderHistory(){
           ${isPending?`
             <div style="font-size:11px;color:#999;margin-bottom:4px;">¿Resultado?</div>
             <div style="display:flex;gap:4px;">
-              <button onclick="updateBetResult(${b.id},'win');renderHistory();" style="font-size:11px;background:#EAF3DE;color:#3B6D11;border:none;border-radius:5px;padding:4px 8px;cursor:pointer;">✓ Ganó</button>
-              <button onclick="updateBetResult(${b.id},'loss');renderHistory();" style="font-size:11px;background:#FCEBEB;color:#A32D2D;border:none;border-radius:5px;padding:4px 8px;cursor:pointer;">✗ Perdió</button>
+              <button onclick="settleFromHistory(${b.id},true);" style="font-size:11px;background:#EAF3DE;color:#3B6D11;border:none;border-radius:5px;padding:4px 8px;cursor:pointer;">✓ Ganó</button>
+              <button onclick="settleFromHistory(${b.id},false);" style="font-size:11px;background:#FCEBEB;color:#A32D2D;border:none;border-radius:5px;padding:4px 8px;cursor:pointer;">✗ Perdió</button>
             </div>`
           :`<span class="badge ${isWin?'badge-green':'badge-red'}">${isWin?'✓ Ganó':'✗ Perdió'}</span>`}
         </div>
@@ -3498,7 +3602,34 @@ function generateCombos(matchData){
   }
   const scoredCombos=combos.map(c=>({...c,totalOdds:c.legs.reduce((a,l)=>a*l.odds,1),avgConf:c.legs.reduce((a,l)=>a+l.confidence,0)/c.legs.length})).sort((a,b)=>b.avgConf-a.avgConf).slice(0,6);
 
-  return { bestPerMatch, combos: scoredCombos };
+  // ── TOP 5 DEL DIA ────────────────────────────────────────────────────────
+  // Las 5 oportunidades mas confiables entre TODOS los partidos analizados,
+  // no solo la mejor de cada partido. Ordenadas por confianza (con EV como
+  // desempate), solo +EV, maximo 2 por partido para diversificar.
+  // IMPORTANTE: son 5 oportunidades INDEPENDIENTES -- no es "si falla la #1,
+  // la #2 la recupera". Cada partido es un evento separado; perder una no se
+  // "recupera" apostando otra, cada una vale por su propio EV.
+  const ODDS_LIMIT_TOP5 = ODDS_LIMIT + 0.5;
+  const flatBets = [];
+  allBets.forEach(mb => {
+    mb.bets.filter(b=>b&&b.market).forEach(b => {
+      const ev = calcEV(b.confidence, b.odds);
+      if (ev <= 0 || b.odds > ODDS_LIMIT_TOP5) return;
+      flatBets.push(Object.assign({}, b, { matchLabel: mb.label, matchObj: mb.match, ev: +ev.toFixed(1) }));
+    });
+  });
+  flatBets.sort(function(a,b){ return b.confidence - a.confidence || b.ev - a.ev; });
+  const top5 = [];
+  const perMatchCount = {};
+  for (const bet of flatBets) {
+    const cnt = perMatchCount[bet.matchLabel] || 0;
+    if (cnt >= 2) continue;
+    top5.push(bet);
+    perMatchCount[bet.matchLabel] = cnt + 1;
+    if (top5.length >= 5) break;
+  }
+
+  return { bestPerMatch, combos: scoredCombos, top5 };
 }
 
 function renderResults(data){
@@ -3513,6 +3644,27 @@ function renderResults(data){
     <div class="metric-card"><div class="metric-label">Mejor combinación</div><div class="metric-val">${bestCombo}x</div></div>`;
 
   const cc=document.getElementById('combos-out'); cc.innerHTML='';
+
+  // --- TOP 5 DEL DIA -- oportunidades independientes, ordenadas por confianza+EV ---
+  if (data.top5 && data.top5.length) {
+    const seenMatch = {};
+    cc.innerHTML += `<div style="background:#fffaf0;border:1px solid #f0e0c0;border-radius:10px;padding:14px;margin-bottom:16px;">
+      <div style="font-size:13px;font-weight:700;color:#854F0B;margin-bottom:4px;">🏆 Top 5 del día</div>
+      <p style="font-size:11px;color:#999;margin-bottom:10px;">Las 5 jugadas más confiables entre todos los partidos analizados. Son oportunidades <b>independientes</b> -- no es "si falla la #1, la #2 la recupera". Cada partido es un evento separado; evalúa cada una por su propio mérito.</p>
+      ${data.top5.map(function(bet, i){
+        const rank = (seenMatch[bet.matchLabel] = (seenMatch[bet.matchLabel]||0) + 1);
+        return `<div style="background:#fff;border-radius:8px;padding:10px 12px;margin-bottom:8px;">
+          <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:2px;">
+            <span style="font-size:11px;font-weight:700;color:#854F0B;">#${i+1}</span>
+            <span style="font-size:11px;color:#999;">${bet.matchLabel}</span>
+          </div>
+          <div style="font-size:14px;font-weight:700;margin-bottom:2px;">${bet.market} <span style="font-weight:400;color:#666;">${bet.odds}x</span></div>
+          <div style="font-size:12px;color:#555;margin-bottom:6px;">${bet.confidence}% confianza · +${bet.ev}% EV</div>
+          ${buildKellyEVPanel(bet, bet.matchLabel, bet.matchObj, rank)}
+        </div>`;
+      }).join('')}
+    </div>`;
+  }
 
   // --- SECCIÓN 1: Jugada más segura por partido ---
   const MIN_CONFIDENCE = parseInt(document.getElementById("min-confidence")?.value||65);
