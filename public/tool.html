@@ -1138,7 +1138,34 @@ async function checkPendingBets() {
   overlay.querySelector('#verify-close').onclick = function(){ overlay.remove(); };
 }
 
-function settleBetPrompt(id, won) {
+// Empareja el texto de un mercado con la linea de cierre capturada
+// automaticamente. Solo soporta victoria (h2h) y goles totales -- corners y
+// tarjetas normalmente requieren un market key especial que no se solicita
+// aqui (ver nota en el proxy sobre getOddsSnapshot).
+function getClosingOddsForBet(market, closingLines, homeTeam, awayTeam) {
+  if (!closingLines) return null;
+  const mkt = (market || '').toLowerCase();
+  if (mkt.startsWith('victoria ')) {
+    if (!closingLines.h2h) return null;
+    const teamName = market.slice(9).trim().toLowerCase();
+    if (homeTeam && teamName.includes((homeTeam.split(' ')[0]||'').toLowerCase())) return closingLines.h2h.home;
+    if (awayTeam && teamName.includes((awayTeam.split(' ')[0]||'').toLowerCase())) return closingLines.h2h.away;
+    return null;
+  }
+  const num = (re) => { const mm = mkt.match(re); return mm ? parseFloat(mm[1]) : null; };
+  let n;
+  if ((n = num(/m[aá]s de ([\d.]+) goles/)) !== null) {
+    const row = (closingLines.totals || []).find(function(t){ return Math.abs(t.point - n) < 0.01; });
+    return row ? row.over : null;
+  }
+  if ((n = num(/menos de ([\d.]+) goles/)) !== null) {
+    const row = (closingLines.totals || []).find(function(t){ return Math.abs(t.point - n) < 0.01; });
+    return row ? row.under : null;
+  }
+  return null; // corners/tarjetas/otros mercados -- sin soporte automatico todavia
+}
+
+async function settleBetPrompt(id, won) {
   const ok = settleBet(id, won);
   if (!ok) return;
   renderBankroll();
@@ -1146,11 +1173,29 @@ function settleBetPrompt(id, won) {
   const tx = (bk.transactions||[]).find(function(t){ return t.id===id; });
   const openOdds = tx ? tx.odds : null;
   if (!openOdds) return;
+
+  // Intentar autocompletar la cuota de cierre desde la watchlist del proxy
+  let autoClosing = null;
+  if (tx.fixtureId) {
+    try {
+      const r = await fetch(PROXY() + '/watchlist/closing?fixtureId=' + tx.fixtureId).then(function(res){ return res.json(); });
+      if (r.found) {
+        const homeTeam = (tx.match||'').split(' vs ')[0];
+        const awayTeam = (tx.match||'').split(' vs ')[1];
+        autoClosing = getClosingOddsForBet(tx.market, r.closingLines, homeTeam, awayTeam);
+      }
+    } catch(e) { /* seguir con entrada manual */ }
+  }
+
   const overlay = document.createElement('div');
   overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:100000;display:flex;align-items:center;justify-content:center;';
+  const autoNote = autoClosing
+    ? '<p style="font-size:11px;color:#3B6D11;margin-bottom:6px;">✓ Autocompletado desde la linea de cierre capturada. Puedes editarlo si tienes un valor mas exacto.</p>'
+    : '<p style="font-size:11px;color:#999;margin-bottom:6px;">No se pudo autocompletar (mercado no soportado o partido sin datos de cierre) -- ingresala manualmente si la recuerdas.</p>';
   overlay.innerHTML = '<div style="background:#fff;border-radius:14px;padding:1.5rem;max-width:340px;width:90%;box-shadow:0 8px 32px rgba(0,0,0,.18);">'
-    + '<p style="font-size:13px;color:#333;margin-bottom:10px;">Tu cuota fue ' + openOdds.toFixed(2) + 'x. Si recuerdas la cuota de cierre (justo antes del partido), ingresala para registrar el CLV. Si no la sabes, puedes omitir.</p>'
-    + '<input type="number" id="clv-closing-input" step="0.01" placeholder="Cuota de cierre, ej 1.75" style="margin-bottom:10px;">'
+    + '<p style="font-size:13px;color:#333;margin-bottom:6px;">Tu cuota fue ' + openOdds.toFixed(2) + 'x.</p>'
+    + autoNote
+    + '<input type="number" id="clv-closing-input" step="0.01" value="' + (autoClosing ? autoClosing.toFixed(2) : '') + '" placeholder="Cuota de cierre, ej 1.75" style="margin-bottom:10px;">'
     + '<div style="display:flex;gap:8px;justify-content:flex-end;">'
     + '<button id="clv-skip" style="background:#f5f5f0;border:1px solid #ddd;border-radius:8px;padding:8px 18px;font-size:13px;cursor:pointer;">Omitir</button>'
     + '<button id="clv-save" style="background:#1a1a1a;color:#fff;border:none;border-radius:8px;padding:8px 18px;font-size:13px;cursor:pointer;">Guardar</button>'
