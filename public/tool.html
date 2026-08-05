@@ -325,6 +325,15 @@ const LEAGUES = [
   { id: 4,   key: 'soccer_uefa_conference_league',   label: 'Conference League',  flag: 'CG', cup: true },
 ];
 
+// Convierte la sport_key interna (ej. 'soccer_argentina_primera_division') al
+// nombre legible ('Argentina') para mostrar en desgloses de ROI/exposicion.
+// Fallback al key crudo si no se encuentra (ej. ligas agregadas manualmente).
+function getLeagueLabel(key) {
+  if (!key) return 'Sin identificar';
+  const found = LEAGUES.find(function(l){ return l.key === key; });
+  return found ? found.label : key;
+}
+
 function switchTab(t) {
   ['config','select','matches','results','history','bankroll','pro','today'].forEach(function(id) {
     document.getElementById('tab-'+id).style.display = t===id?'block':'none';
@@ -576,7 +585,7 @@ function getHistory(){ try{ return JSON.parse(localStorage.getItem(HISTORY_KEY)|
 function saveHistory(h){ try{ localStorage.setItem(HISTORY_KEY, JSON.stringify(h.slice(-200))); }catch(e){} }
 function recordBet(bet, sharedId){
   const h = getHistory();
-  const entry = { id: sharedId||Date.now(), date: new Date().toISOString(), match: bet.match, market: bet.market, odds: bet.odds, confidence: bet.confidence, amount: bet.amount||0, result: 'pending' };
+  const entry = { id: sharedId||Date.now(), date: new Date().toISOString(), match: bet.match, market: bet.market, odds: bet.odds, confidence: bet.confidence, amount: bet.amount||0, result: 'pending', league: bet.league||null };
   h.push(entry);
   saveHistory(h);
   saveBetToCloud(entry);
@@ -586,8 +595,18 @@ function updateBetResult(id, result, closingOdds){ // result: 'win' | 'loss'
   saveHistory(h);
   updateBetInCloud(id, result, closingOdds||null);
 }
-function getStats(){
-  const h = getHistory().filter(b=>b.result!=='pending');
+// Filtra el historial a los ultimos N dias (null = todo el historico).
+// Usado por el selector de rango de fechas en la pestana Historial.
+function getFilteredHistory(days) {
+  const h = getHistory();
+  if (!days) return h;
+  const cutoff = Date.now() - days*24*60*60*1000;
+  return h.filter(function(b){ return new Date(b.date).getTime() >= cutoff; });
+}
+
+function getStats(historyOverride){
+  const full = historyOverride || getHistory();
+  const h = full.filter(b=>b.result!=='pending');
   if(!h.length) return null;
   const wins = h.filter(b=>b.result==='win').length;
   const roi = h.reduce((s,b)=> b.result==='win' ? s+(b.odds-1) : s-1, 0) / h.length * 100;
@@ -598,7 +617,7 @@ function getStats(){
     byConf[bucket].total++;
     if(b.result==='win') byConf[bucket].wins++;
   });
-  return { total:h.length, wins, losses:h.length-wins, winRate:+(wins/h.length*100).toFixed(1), roi:+roi.toFixed(1), byConf, pending: getHistory().filter(b=>b.result==='pending').length };
+  return { total:h.length, wins, losses:h.length-wins, winRate:+(wins/h.length*100).toFixed(1), roi:+roi.toFixed(1), byConf, pending: full.filter(b=>b.result==='pending').length };
 }
 
 // Kelly Criterion — tamaño óptimo de apuesta
@@ -999,7 +1018,7 @@ function getRemainingBetsToday(bk){
   return Math.max(0, bk.maxBetsPerDay - getBetsToday(bk).length);
 }
 
-function placeBet(match, market, odds, confidence, amount, fixtureId){
+function placeBet(match, market, odds, confidence, amount, fixtureId, league){
   const bk = getBK();
 
   // Validaciones
@@ -1019,6 +1038,7 @@ function placeBet(match, market, odds, confidence, amount, fixtureId){
     status: 'pending',
     bookmaker: bk.settings.bookmaker,
     fixtureId: fixtureId || null, // usado para verificacion automatica de resultados
+    league: league || null,
   };
 
   bk.current = +(bk.current - amount).toFixed(2);
@@ -1027,7 +1047,7 @@ function placeBet(match, market, odds, confidence, amount, fixtureId){
   syncBankrollTxToCloud(tx);
 
   // También registrar en historial de apuestas
-  recordBet({match, market, odds, confidence}, sharedId);
+  recordBet({match, market, odds, confidence, league}, sharedId);
 
   return { ok:true, tx, remaining: getRemainingBetsToday(bk) };
 }
@@ -1272,6 +1292,29 @@ function renderBankroll(){
 
     ${bk.current < bk.alertThreshold ? `<div style="background:#FCEBEB;border:1px solid #f5c0c0;border-radius:8px;padding:10px 14px;margin-bottom:10px;font-size:13px;color:#A32D2D;">! Saldo por debajo del umbral de alerta (${bk.currency}${bk.alertThreshold}). Considera reducir el monto por apuesta.</div>` : ''}
 
+    <!-- EXPOSICION TOTAL -- suma TODAS las pendientes, no solo las de hoy.
+         Util para gestion profesional: saber cuanto % de la banca esta en
+         riesgo en este momento, sumando partidos de todas las competiciones. -->
+    ${(function(){
+      const allPending = (bk.transactions||[]).filter(function(t){ return t.status==='pending'; });
+      if (!allPending.length) return '';
+      const totalExposure = allPending.reduce(function(s,t){ return s+t.amount; }, 0);
+      const exposurePct = bk.current > 0 ? (totalExposure/bk.current*100) : 0;
+      const expColor = exposurePct >= 40 ? '#A32D2D' : exposurePct >= 20 ? '#854F0B' : '#3B6D11';
+      const expWarning = exposurePct >= 40 ? ' ⚠️ Exposicion alta -- considera esperar a que se resuelvan algunas antes de abrir mas' : '';
+      return `<div style="background:#fff;border:1px solid #e5e5e5;border-radius:12px;padding:1rem;margin-bottom:10px;">
+        <p class="section-label" style="margin-bottom:8px;">Exposición total (todas las competiciones)</p>
+        <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:6px;">
+          <span style="font-size:22px;font-weight:800;color:${expColor};">${bk.currency}${totalExposure.toFixed(2)}</span>
+          <span style="font-size:13px;color:${expColor};font-weight:600;">${exposurePct.toFixed(0)}% de tu banca</span>
+        </div>
+        <div style="background:#f0f0f0;border-radius:4px;height:6px;margin-bottom:6px;">
+          <div style="width:${Math.min(100,exposurePct)}%;height:100%;background:${expColor};border-radius:4px;"></div>
+        </div>
+        <p style="font-size:11px;color:#999;">${allPending.length} apuesta(s) pendiente(s) en total${expWarning}</p>
+      </div>`;
+    })()}
+
     <!-- LÍMITES DEL DÍA -->
     <div style="background:#fff;border:1px solid #e5e5e5;border-radius:12px;padding:1rem;margin-bottom:10px;">
       <p class="section-label" style="margin-bottom:10px;">Límites de hoy</p>
@@ -1398,6 +1441,7 @@ function handleBetClick(btn){
   const confidence = parseInt(btn.getAttribute('data-confidence'));
   const defaultAmt = parseFloat(btn.getAttribute('data-default'));
   const fixtureId = btn.getAttribute('data-fixture-id') || null;
+  const league = btn.getAttribute('data-league') || null;
 
   const inp = document.getElementById(safeId);
   const amt = inp ? parseFloat(inp.value)||defaultAmt : defaultAmt;
@@ -1410,7 +1454,7 @@ function handleBetClick(btn){
     return;
   }
 
-  const res = placeBet(match, market, odds, confidence, amt, fixtureId);
+  const res = placeBet(match, market, odds, confidence, amt, fixtureId, league);
 
   if(res.ok){
     btn.style.background = '#3B6D11';
@@ -1427,13 +1471,35 @@ function handleBetClick(btn){
 }
 
 function renderHistory(){
-  const stats = getStats();
+  // Filtro de rango de fechas -- por defecto 'todo', se recuerda en la sesion
+  if (typeof window._historyDaysFilter === 'undefined') window._historyDaysFilter = null;
+  const filteredHistory = getFilteredHistory(window._historyDaysFilter);
+  const stats = getStats(filteredHistory);
   const mr = document.getElementById('history-stats');
+  const filterBar = `<div style="display:flex;gap:6px;margin-bottom:12px;">
+    ${[[7,'7 dias'],[30,'30 dias'],[null,'Todo']].map(([days,label])=>`
+      <button onclick="window._historyDaysFilter=${days};renderHistory();" style="flex:1;font-size:12px;padding:7px;border-radius:6px;cursor:pointer;border:1px solid ${window._historyDaysFilter===days?'#1a1a1a':'#ddd'};background:${window._historyDaysFilter===days?'#1a1a1a':'#fff'};color:${window._historyDaysFilter===days?'#fff':'#555'};">${label}</button>
+    `).join('')}
+  </div>`;
   if(!stats){
-    mr.innerHTML='<div style="text-align:center;padding:1rem;font-size:13px;color:#999;">No hay jugadas registradas aún.<br>Analiza partidos y usa el botón "+ Registrar jugada" para trackear tus apuestas.</div>';
+    mr.innerHTML=filterBar+'<div style="text-align:center;padding:1rem;font-size:13px;color:#999;">No hay jugadas registradas en este rango.<br>Analiza partidos y usa el botón "+ Registrar jugada" para trackear tus apuestas.</div>';
   } else {
     const roiColor = stats.roi>0?'#3B6D11':stats.roi<0?'#A32D2D':'#854F0B';
-    mr.innerHTML=`<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:1rem;">
+    const leagueRoi = getRoiByLeague(filteredHistory);
+    const leaguePanel = leagueRoi.length ? `
+    <div style="background:#f5f5f0;border-radius:8px;padding:10px 12px;margin-top:10px;">
+      <p class="section-label" style="margin-bottom:8px;">ROI por liga/competicion</p>
+      ${leagueRoi.map(function(l){
+        const c = l.roi>0?'#3B6D11':l.roi<0?'#A32D2D':'#854F0B';
+        return `<div style="display:flex;justify-content:space-between;align-items:center;padding:5px 0;border-bottom:1px solid #ebebe6;font-size:12px;">
+          <span style="color:#333;">${l.league}</span>
+          <span style="color:#999;">${l.total} apuesta(s) · ${l.winRate}% acierto</span>
+          <span style="font-weight:700;color:${c};min-width:55px;text-align:right;">${l.roi>=0?'+':''}${l.roi}%</span>
+        </div>`;
+      }).join('')}
+      <p style="font-size:10px;color:#999;margin-top:6px;">Util para ver donde concentra la ventaja el modelo y donde no, en vez de solo mirar el ROI agregado.</p>
+    </div>` : '';
+    mr.innerHTML=filterBar+`<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:1rem;">
       <div class="metric-card"><div class="metric-label">Total registradas</div><div class="metric-val">${stats.total}</div></div>
       <div class="metric-card"><div class="metric-label">Aciertos</div><div class="metric-val" style="color:#3B6D11;">${stats.wins}</div></div>
       <div class="metric-card"><div class="metric-label">% acierto</div><div class="metric-val">${stats.winRate}%</div></div>
@@ -1450,11 +1516,12 @@ function renderHistory(){
           </div>
           <span style="font-size:12px;font-weight:600;min-width:60px;">${data.wins}/${data.total} (${Math.round(data.wins/data.total*100)}%)</span>
         </div>`).join('')}
+    ${leaguePanel}
     <div style="background:#fff;border:1px solid #e5e5e5;border-radius:10px;padding:12px;margin-top:10px;">
       <p style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:0.06em;margin-bottom:8px;">Evolucion del ROI acumulado</p>
       <canvas id="roi-chart" height="80" style="width:100%;display:block;"></canvas>
     </div>`;
-    setTimeout(drawROIChart, 80);
+    setTimeout(function(){ drawROIChart(filteredHistory); }, 80);
   }
 
   const list = document.getElementById('history-list');
@@ -1570,6 +1637,7 @@ function buildKellyEVPanel(bet, matchLabel, matchData, siblingRank){
         data-confidence="${bet.confidence}"
         data-default="${kelly.suggestedAmount.toFixed(2)}"
         data-fixture-id="${matchData?.fixtureId||''}"
+        data-league="${matchData?.league||''}"
         onclick="handleBetClick(this)"
         style="flex:1;font-size:12px;font-weight:600;background:#1a1a1a;color:#fff;border:none;border-radius:6px;padding:6px 10px;cursor:pointer;">
         💰 Apostar <span class="bet-btn-label">${kelly.suggestedAmount.toFixed(2)}</span>
@@ -2604,8 +2672,12 @@ function calcBets(m){
   const aCtxGoals = isNeutralVenue ? aGoalsSafe : (a.isHomeContext!==null?aFormGoals:aGoalsSafe);
 
   // GOLES totales con todos los ajustes
-  const indGoals=((hCtxGoals*(1-hIP)+homeGoalsAdj+hDefAdj+hXGadj+hLuckGoalsAdj+hPressingGoalsAdj+aCtxGoals*(1-aIP)+awayGoalsAdj+aDefAdj+aXGadj+aLuckGoalsAdj+aPressingGoalsAdj)/2)+weatherGoalsAdj+refGoalsAdj+impGoalsAdj+playerGoalsAdj+necGoalsAdj+knockoutGoalsAdj+neutralVenueAdj+streakGoalsAdj+formationGoalsAdj;
-  const ag=h2h?indGoals*W_IND+h2h.avgGoals*W_H2H:indGoals;
+  const indGoalsRaw=((hCtxGoals*(1-hIP)+homeGoalsAdj+hDefAdj+hXGadj+hLuckGoalsAdj+hPressingGoalsAdj+aCtxGoals*(1-aIP)+awayGoalsAdj+aDefAdj+aXGadj+aLuckGoalsAdj+aPressingGoalsAdj)/2)+weatherGoalsAdj+refGoalsAdj+impGoalsAdj+playerGoalsAdj+necGoalsAdj+knockoutGoalsAdj+neutralVenueAdj+streakGoalsAdj+formationGoalsAdj;
+  // MEJORA: indGoals combina ~13 ajustes distintos (clima, arbitro, importancia,
+  // jugadores, necesidad, eliminatoria, racha, formacion...) sin ningun limite.
+  // Rango realista de goles totales esperados por partido: 0.3-5.5.
+  const indGoals = Math.max(0.3, Math.min(5.5, indGoalsRaw));
+  const ag=Math.max(0.3, Math.min(6.5, h2h?indGoals*W_IND+h2h.avgGoals*W_H2H:indGoals));
 
   // CÓRNERS
   const indCorners=((hCornersSafe+homeCornersAdj+aCornersSafe+awayCornersAdj)/2)+weatherCornersAdj;
@@ -2834,7 +2906,9 @@ function calcBets(m){
   const aCornersExp = aCornersAgainst !== null
     ? (aCornersSafe + aCornersAgainst) / 2   // visitante: promedia corners generados vs concedidos por rival
     : aCornersSafe;
-  const totalCorners = hCornersExp + aCornersExp + weatherCornersAdj;
+  const totalCornersRaw = hCornersExp + aCornersExp + weatherCornersAdj;
+  // MEJORA: rango realista de corners totales es aprox. 2-16.
+  const totalCorners = Math.max(2, Math.min(16, totalCornersRaw));
   if (totalCorners >= 7.0) {
     const cornersLine = totalCorners >= 11 ? 10.5 : totalCorners >= 9.0 ? 8.5 : 7.5;
     const cornersConf = Math.min(85, Math.round(50 + (totalCorners - cornersLine) * 10 + (isRainy ? -5 : 0) + (hDefReliable && aDefReliable ? 5 : -5)));
@@ -2878,7 +2952,9 @@ function calcBets(m){
     : (aDefReliable ? cardsAgainstByRating[aDef.defensiveRating] || 3.0 : null);
   const hCardsExp = hCardsAgainst !== null ? (hCardsSafe + hCardsAgainst) / 2 : hCardsSafe;
   const aCardsExp = aCardsAgainst !== null ? (aCardsSafe + aCardsAgainst) / 2 : aCardsSafe;
-  const totalCards = hCardsExp + aCardsExp + (ref?.avgCards ? (ref.avgCards - 4.0) * 0.3 : 0) + weatherCardsAdj + (necDiff !== 0 || isHighStakes ? 0.3 : 0) + knockoutCardsAdj;
+  const totalCardsRaw = hCardsExp + aCardsExp + (ref?.avgCards ? (ref.avgCards - 4.0) * 0.3 : 0) + weatherCardsAdj + (necDiff !== 0 || isHighStakes ? 0.3 : 0) + knockoutCardsAdj;
+  // MEJORA: rango realista de tarjetas totales es aprox. 0.5-9.
+  const totalCards = Math.max(0.5, Math.min(9, totalCardsRaw));
   if (totalCards >= 3.5) {
     const cardsLine = totalCards >= 5.0 ? 4.5 : totalCards >= 4.0 ? 3.5 : 2.5;
     const cardsConf = Math.min(85, Math.round(52 + (totalCards - cardsLine) * 12 + (ref?.strictness === 'estricto' ? 6 : 0) + (isHighStakes ? 4 : 0) + (hDefReliable && aDefReliable ? 4 : -4)));
@@ -3626,11 +3702,17 @@ function settleQuick(betId, won) {
 }
 
 // ── ROI POR LIGA ──────────────────────────────────────────────────────────
-function getRoiByLeague() {
-  const h = getHistory().filter(function(b){ return b.result !== 'pending'; });
+// BUGFIX: antes intentaba extraer la liga cortando el texto del partido en
+// " - ", pero los partidos se guardan como "Equipo A vs Equipo B" (sin
+// prefijo de liga), asi que cada partido terminaba siendo su propia "liga".
+// Ahora usa el campo league real guardado en cada apuesta. Apuestas viejas
+// (de antes de este fix) no tienen ese campo y se agrupan en "Sin identificar".
+function getRoiByLeague(historyOverride) {
+  const full = historyOverride || getHistory();
+  const h = full.filter(function(b){ return b.result !== 'pending'; });
   const byLeague = {};
   h.forEach(function(b) {
-    const league = (b.match || '').split(' - ')[0] || 'Otras';
+    const league = getLeagueLabel(b.league);
     if (!byLeague[league]) byLeague[league] = { wins: 0, total: 0, staked: 0, returned: 0 };
     byLeague[league].total++;
     byLeague[league].staked += b.amount || 0;
@@ -3908,10 +3990,10 @@ function buildRiskPanel(m, bets) {
 }
 
 // ── ROI CHART ──────────────────────────────────────────────────────────────
-function drawROIChart() {
+function drawROIChart(historyOverride) {
   var canvas = document.getElementById('roi-chart');
   if (!canvas) return;
-  var h = getHistory().filter(function(b){ return b.result !== 'pending'; })
+  var h = (historyOverride || getHistory()).filter(function(b){ return b.result !== 'pending'; })
                       .sort(function(a,b){ return new Date(a.date) - new Date(b.date); });
   if (h.length < 2) {
     var p = document.createElement('p');
