@@ -957,6 +957,8 @@ function getBK(){
     alertThreshold: 20, // alerta si baja de este monto
     transactions: [],
     monthlyTargetPct: null, // objetivo de ROI mensual en % -- null hasta que el usuario lo defina
+    profitBankBaseline: null, // monto de referencia para sugerencias de retiro de ganancias -- null hasta configurarlo
+    profitBankThresholdPct: 10, // % de ganancia sobre el baseline al que se sugiere retirar el excedente
     settings: { bookmaker: 'Bet365', strategy: 'halfKelly' }
   }; } catch(e) { return null; }
 }
@@ -1295,6 +1297,38 @@ function withdrawBK(amount){
   return true;
 }
 
+// ── PROFIT BANKING (retiro sugerido por umbral) ──────────────────────────────
+// Idea: mantener una banca de trabajo estable, y cuando el saldo supera esa
+// base en X%, sugerir retirar SOLO el excedente -- asegurando la ganancia sin
+// tocar el capital de trabajo. El tamano de cada apuesta lo sigue decidiendo
+// Half-Kelly normalmente; esto no cambia el staking, solo cuando "sacar
+// ganancia de la mesa".
+function setProfitBankBaseline(amount, thresholdPct) {
+  const bk = getBK();
+  bk.profitBankBaseline = amount;
+  bk.profitBankThresholdPct = thresholdPct || 10;
+  saveBK(bk);
+  renderBankroll();
+}
+
+function getProfitBankSuggestion(bk) {
+  if (bk.profitBankBaseline == null) return null;
+  const threshold = bk.profitBankBaseline * (1 + bk.profitBankThresholdPct/100);
+  if (bk.current < threshold) return null;
+  const excess = +(bk.current - bk.profitBankBaseline).toFixed(2);
+  return { excess: excess, threshold: threshold };
+}
+
+function withdrawProfitBankExcess() {
+  const bk = getBK();
+  const sug = getProfitBankSuggestion(bk);
+  if (!sug) return;
+  if (withdrawBK(sug.excess)) {
+    showToast('Ganancia asegurada: ' + bk.currency + sug.excess.toFixed(2), 'success', 4000);
+    renderBankroll();
+  }
+}
+
 function getBKStats(bk){
   const bets = bk.transactions.filter(t=>t.type==='bet');
   const settled = bets.filter(t=>t.status!=='pending');
@@ -1364,6 +1398,48 @@ function renderBankroll(){
           <div style="width:${Math.max(0,pct)}%;height:100%;background:${roiColor};border-radius:4px;"></div>
         </div>
         <p style="font-size:11px;color:#999;margin-top:6px;">${mp.count} apuesta(s) resuelta(s) este mes · ${bk.currency}${mp.staked.toFixed(2)} apostado</p>
+      </div>`;
+    })()}
+
+    <!-- PROFIT BANKING -- sugerencia de retiro de ganancias por umbral -->
+    ${(function(){
+      if (bk.profitBankBaseline == null) {
+        return `<div style="background:#fff;border:1px solid #e5e5e5;border-radius:12px;padding:1rem;margin-bottom:10px;">
+          <p class="section-label" style="margin-bottom:8px;">Retiro de ganancias por umbral</p>
+          <p style="font-size:12px;color:#999;margin-bottom:10px;">Define un monto base de referencia (tu "banca de trabajo") y un % de ganancia -- cuando tu saldo supere ese %, el tool te va a sugerir retirar SOLO el excedente, asegurando la ganancia sin tocar el capital de trabajo. El tamaño de cada apuesta lo sigue decidiendo Half-Kelly normalmente, esto solo decide cuándo "sacar ganancia de la mesa".</p>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px;">
+            <div>
+              <label style="font-size:11px;color:#999;">Monto base (${bk.currency})</label>
+              <input type="number" id="pb-baseline-input" placeholder="Ej. ${bk.current}" value="${bk.current}" style="width:100%;padding:8px;border:1px solid #ddd;border-radius:6px;font-size:13px;">
+            </div>
+            <div>
+              <label style="font-size:11px;color:#999;">Umbral de ganancia (%)</label>
+              <input type="number" id="pb-threshold-input" placeholder="Ej. 10" value="10" style="width:100%;padding:8px;border:1px solid #ddd;border-radius:6px;font-size:13px;">
+            </div>
+          </div>
+          <button onclick="const b=parseFloat(document.getElementById('pb-baseline-input').value);const t=parseFloat(document.getElementById('pb-threshold-input').value);if(b>0&&t>0)setProfitBankBaseline(b,t);" style="width:100%;background:#1a1a1a;color:#fff;border:none;border-radius:6px;padding:9px;font-size:13px;cursor:pointer;">Activar</button>
+        </div>`;
+      }
+      const sug = getProfitBankSuggestion(bk);
+      const threshold = bk.profitBankBaseline * (1 + bk.profitBankThresholdPct/100);
+      const progressPct = Math.min(100, (bk.current/threshold)*100);
+      return `<div style="background:#fff;border:1px solid #e5e5e5;border-radius:12px;padding:1rem;margin-bottom:10px;">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
+          <p class="section-label" style="margin-bottom:0;">Retiro de ganancias por umbral</p>
+          <button onclick="const bk2=getBK();bk2.profitBankBaseline=null;saveBK(bk2);renderBankroll();" style="font-size:11px;color:#999;background:none;border:none;cursor:pointer;text-decoration:underline;">reconfigurar</button>
+        </div>
+        <p style="font-size:11px;color:#999;margin-bottom:8px;">Base: ${bk.currency}${bk.profitBankBaseline.toFixed(2)} · Umbral (+${bk.profitBankThresholdPct}%): ${bk.currency}${threshold.toFixed(2)}</p>
+        ${sug ? `
+          <div style="background:#EAF3DE;border-radius:8px;padding:10px 12px;margin-bottom:6px;">
+            <div style="font-size:13px;font-weight:700;color:#3B6D11;margin-bottom:4px;">✓ Umbral alcanzado -- excedente: ${bk.currency}${sug.excess.toFixed(2)}</div>
+            <button onclick="withdrawProfitBankExcess()" style="width:100%;background:#3B6D11;color:#fff;border:none;border-radius:6px;padding:8px;font-size:13px;cursor:pointer;">Retirar excedente y asegurar ganancia</button>
+          </div>
+        ` : `
+          <div style="background:#f0f0f0;border-radius:4px;height:8px;">
+            <div style="width:${Math.max(0,progressPct)}%;height:100%;background:#185FA5;border-radius:4px;"></div>
+          </div>
+          <p style="font-size:11px;color:#999;margin-top:6px;">Faltan ${bk.currency}${Math.max(0,(threshold-bk.current)).toFixed(2)} para alcanzar el umbral.</p>
+        `}
       </div>`;
     })()}
 
