@@ -174,18 +174,24 @@ export default function DashboardPage() {
 
         {/* HERRAMIENTA */}
         {activeTab === 'herramienta' && (
-          <div className="bg-white rounded-xl border border-gray-200 p-6 text-center">
-            <p className="text-sm text-gray-700 font-medium mb-2">Herramienta de analisis HTML</p>
-            <p className="text-xs text-gray-400 mb-4">
-              La herramienta de prediccion sigue siendo el archivo betting-tool-v3.html.
-              Proximamente estara integrada aqui.
-            </p>
-            <div className="bg-gray-50 rounded-lg p-4 text-left">
-              <p className="text-xs text-gray-500 font-medium mb-2">Tu conexion Supabase:</p>
-              <p className="text-xs text-gray-400 font-mono break-all">
-                {process.env.NEXT_PUBLIC_SUPABASE_URL || 'Configura las variables de entorno'}
-              </p>
+          <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
+            <div className="flex items-center justify-between px-4 py-2 border-b border-gray-100">
+              <p className="text-xs text-gray-500">Analizador (betting-tool-v3)</p>
+              <a
+                href="/tool.html"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-xs text-gray-500 hover:text-gray-900 underline"
+              >
+                Abrir en pestana nueva ↗
+              </a>
             </div>
+            <iframe
+              src="/tool.html"
+              title="Analizador de apuestas"
+              className="w-full border-0"
+              style={{ height: 'calc(100vh - 220px)', minHeight: '600px' }}
+            />
           </div>
         )}
 
