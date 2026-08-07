@@ -1401,6 +1401,17 @@ function renderBankroll(){
       </div>`;
     })()}
 
+    <!-- COBERTURA DE CLV -- recordatorio visible en el dia a dia, no solo
+         cuando se entra a Analisis Pro. -->
+    ${(function(){
+      const clvCov = getCLVStats();
+      if (clvCov.resolvedCount < 5) return '';
+      const covColor = clvCov.coveragePct >= 50 ? '#3B6D11' : clvCov.coveragePct >= 20 ? '#854F0B' : '#A32D2D';
+      return `<div style="background:#f5f5f0;border-radius:8px;padding:8px 12px;margin-bottom:10px;font-size:12px;color:#666;">
+        Cobertura de CLV: <span style="color:${covColor};font-weight:700;">${clvCov.n}/${clvCov.resolvedCount} (${clvCov.coveragePct}%)</span> de tus apuestas resueltas
+      </div>`;
+    })()}
+
     <!-- PROFIT BANKING -- sugerencia de retiro de ganancias por umbral -->
     ${(function(){
       if (bk.profitBankBaseline == null) {
@@ -1781,7 +1792,16 @@ function buildKellyEVPanel(bet, matchLabel, matchData, siblingRank){
   const evColor = ev>5?'#3B6D11':ev>0?'#854F0B':'#A32D2D';
   const evLabel = ev>5?'EV positivo ✓':ev>0?'EV marginal':'EV negativo ✗';
 
-  return `<div style="border-top:1px solid #f0f0f0;margin-top:8px;padding-top:8px;display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;">
+  // Advertencia de calibracion: esta combinacion especifica de mercado+banda
+  // de confianza ha tenido un acierto real muy por debajo de lo predicho en
+  // tu historial. Se muestra aqui (no solo en Analisis Pro) porque es el
+  // momento en que realmente importa -- justo antes de decidir apostar.
+  const calWarning = getBetCalibrationWarning(bet);
+  const calWarningHtml = calWarning ? `<div style="background:#FCEBEB;border:1px solid #f0c0c0;border-radius:8px;padding:8px 10px;margin-bottom:8px;font-size:11px;color:#A32D2D;">
+    ⚠️ Historicamente, jugadas de este tipo en esta banda de confianza aciertan ${Math.abs(calWarning.gap)} pts menos de lo predicho (n=${calWarning.n}, confiabilidad ${calWarning.reliability}). Tomalo con cautela.
+  </div>` : '';
+
+  return `${calWarningHtml}<div style="border-top:1px solid #f0f0f0;margin-top:8px;padding-top:8px;display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;">
     <div style="background:#f5f5f0;border-radius:6px;padding:6px 8px;text-align:center;">
       <div style="font-size:10px;color:#999;margin-bottom:2px;" title="Se usa la mitad del Kelly completo para reducir la varianza del bankroll">½ Kelly sugerido</div>
       <div style="font-size:14px;font-weight:700;">${adjustedHalfKelly}%</div>
@@ -3454,6 +3474,20 @@ function getCalibrationPlotData() {
   });
 }
 
+// Clasifica el texto de un mercado en categoria -- compartida entre el Nivel 2
+// de calibracion y la advertencia por jugada, para no duplicar la logica.
+function getMarketCategory(market) {
+  if (!market) return 'other';
+  const m = market.toLowerCase();
+  if (m.includes('gol') || m.includes('over') || m.includes('under') || m.includes('2.5') || m.includes('1.5')) return 'goals';
+  if (m.includes('victoria') || m.includes('gana') || m.includes('handicap')) return 'result';
+  if (m.includes('btts') || m.includes('ambos')) return 'btts';
+  if (m.includes('corner') || m.includes('esquina')) return 'corners';
+  if (m.includes('tarjeta') || m.includes('card')) return 'cards';
+  if (m.includes('arquero') || m.includes('remate') || m.includes('tiro')) return 'shots';
+  return 'other';
+}
+
 // ── NIVEL 2: Calibracion por tipo de mercado ─────────────────────────────────
 // Detecta si el modelo sobreestima sistematicamente ciertos mercados.
 // Ej: si "mas de 2.5 goles" tiene 40% de acierto real vs 70% predicho -> -12 pts
@@ -3461,21 +3495,8 @@ function getMarketCalibrationAdj(marketName) {
   const h = getHistory().filter(function(b){ return b.result !== 'pending'; });
   if (h.length < 15) return 0;
 
-  // Clasificar el mercado en categoria
-  const getCategory = function(market) {
-    if (!market) return 'other';
-    const m = market.toLowerCase();
-    if (m.includes('gol') || m.includes('over') || m.includes('under') || m.includes('2.5') || m.includes('1.5')) return 'goals';
-    if (m.includes('victoria') || m.includes('gana') || m.includes('handicap')) return 'result';
-    if (m.includes('btts') || m.includes('ambos')) return 'btts';
-    if (m.includes('corner') || m.includes('esquina')) return 'corners';
-    if (m.includes('tarjeta') || m.includes('card')) return 'cards';
-    if (m.includes('arquero') || m.includes('remate') || m.includes('tiro')) return 'shots';
-    return 'other';
-  };
-
-  const targetCat = getCategory(marketName);
-  const inCat = h.filter(function(b){ return getCategory(b.market) === targetCat; });
+  const targetCat = getMarketCategory(marketName);
+  const inCat = h.filter(function(b){ return getMarketCategory(b.market) === targetCat; });
   if (inCat.length < 8) return 0; // muestra insuficiente para este mercado
 
   const realRate = inCat.filter(function(b){ return b.result === 'win'; }).length / inCat.length;
@@ -3484,6 +3505,30 @@ function getMarketCalibrationAdj(marketName) {
 
   // Aplicar hasta +/-10 puntos de ajuste por mercado
   return Math.max(-10, Math.min(10, Math.round(bias * 45)));
+}
+
+// ── ADVERTENCIA DE CALIBRACION POR JUGADA ────────────────────────────────────
+// Combina el Nivel 2 (mercado) con la banda de confianza real (Nivel 1 plot)
+// para avisar en el momento de apostar -- no solo en la pestana Analisis Pro --
+// cuando la jugada sugerida cae en una combinacion mercado+banda con mal
+// historial real. Incluye una etiqueta de confiabilidad segun tamano de
+// muestra, para no sobre-alarmar con señales basadas en pocas jugadas.
+function getBetCalibrationWarning(bet) {
+  const marketAdj = getMarketCalibrationAdj(bet.market);
+  const bandData = getCalibrationPlotData().find(function(d){ return bet.confidence >= d.min && bet.confidence < d.max; });
+  if (!bandData || bandData.n < 8 || bandData.real == null) return null;
+  const gap = bandData.real - bandData.predicted;
+  // Solo advertir si la brecha de la banda es grande Y el mercado especifico
+  // tambien esta penalizado -- evita advertencias por ruido de una sola señal.
+  if (gap <= -20 && marketAdj < -3) {
+    return {
+      gap: Math.round(gap),
+      n: bandData.n,
+      marketAdj: marketAdj,
+      reliability: bandData.n >= 20 ? 'alta' : bandData.n >= 12 ? 'media' : 'baja',
+    };
+  }
+  return null;
 }
 
 // ── NIVEL 3: Calibracion por liga ────────────────────────────────────────────
@@ -4358,7 +4403,14 @@ function runBacktest() {
 
   // Si el ROI en test es mucho peor que en train, hay overfitting / sobreajuste
   const overfitGap = trainResult.roi - testResult.roi;
+  // BUGFIX: antes solo detectaba sobreajuste cuando entrenamiento >> prueba
+  // (overfitGap > 15). Si prueba resultaba mucho MEJOR que entrenamiento
+  // (gap negativo grande), la condicion nunca se activaba y el mensaje decia
+  // "consistente" sin importar que tan grande fuera la diferencia -- un salto
+  // de 20+ puntos en cualquier direccion no es consistencia, especialmente
+  // con muestras chicas donde el ruido estadistico pesa mucho.
   const isOverfit = overfitGap > 15 && testSet.length >= 5;
+  const isReverseDivergence = overfitGap < -15 && testSet.length >= 5;
 
   return {
     valid: true,
@@ -4367,6 +4419,7 @@ function runBacktest() {
     testResult: testResult,
     overfitGap: overfitGap,
     isOverfit: isOverfit,
+    isReverseDivergence: isReverseDivergence,
   };
 }
 
@@ -4389,7 +4442,9 @@ function recordClosingLine(betId, openOdds, closingOdds) {
 function getCLVStats() {
   let records = [];
   try { records = JSON.parse(localStorage.getItem(CLV_KEY) || '[]'); } catch(e) {}
-  if (!records.length) return { hasData: false, n: 0 };
+  const resolvedCount = getHistory().filter(function(b){ return b.result !== 'pending'; }).length;
+  const coveragePct = resolvedCount > 0 ? Math.round((records.length / resolvedCount) * 100) : 0;
+  if (!records.length) return { hasData: false, n: 0, coveragePct: 0, resolvedCount: resolvedCount };
   const avgCLV = records.reduce(function(s,r){ return s + r.clvPct; }, 0) / records.length;
   const positiveCount = records.filter(function(r){ return r.clvPct > 0; }).length;
   return {
@@ -4398,6 +4453,8 @@ function getCLVStats() {
     avgCLV: avgCLV,
     positiveRate: (positiveCount / records.length) * 100,
     records: records,
+    coveragePct: coveragePct,
+    resolvedCount: resolvedCount,
   };
 }
 
@@ -4489,6 +4546,15 @@ function checkLineMovement(matchKey, currentConsensus) {
   };
 }
 
+// Etiqueta de confiabilidad segun tamano de muestra -- reutilizada en el
+// grafico de calibracion y en los indicadores de Nivel 1/2, para que se sepa
+// cuanto peso darle a cada senal sin tener que preguntar cada vez.
+function getReliabilityLabel(n) {
+  if (n >= 20) return { text: 'muestra sólida', color: '#3B6D11' };
+  if (n >= 12) return { text: 'muestra media', color: '#854F0B' };
+  return { text: 'muestra chica', color: '#A32D2D' };
+}
+
 // ── RENDER: PESTANA ANALISIS PRO ───────────────────────────────────────────
 // Grafico simple de calibracion: predicho vs real por banda de confianza.
 // Barras horizontales -- mas facil de leer en mobile que un scatter plot.
@@ -4499,9 +4565,10 @@ function buildCalibrationChart() {
     const realPct = d.real == null ? 0 : d.real;
     const diff = d.real == null ? null : (d.real - d.predicted);
     const diffColor = diff == null ? '#999' : diff >= 0 ? '#3B6D11' : '#A32D2D';
+    const rel = getReliabilityLabel(d.n);
     return '<div style="margin-bottom:8px;">'
       + '<div style="display:flex;justify-content:space-between;font-size:10px;color:#888;margin-bottom:2px;">'
-      + '<span>' + d.min + '-' + d.max + '% (n=' + d.n + ')</span>'
+      + '<span>' + d.min + '-' + d.max + '% (n=' + d.n + ' · <span style="color:' + rel.color + ';">' + rel.text + '</span>)</span>'
       + '<span style="color:' + diffColor + ';">' + (diff==null?'sin datos':(diff>=0?'+':'')+diff.toFixed(0)+' pts') + '</span>'
       + '</div>'
       + '<div style="position:relative;height:14px;background:#f0f0f0;border-radius:4px;overflow:hidden;">'
@@ -4538,15 +4605,18 @@ function renderProAnalysis() {
   if (hAll.length < 15) {
     html += '<p style="font-size:13px;color:#999;">Necesitas al menos 15 apuestas resueltas. Tienes ' + hAll.length + '.</p></div>';
   } else {
+    var l1Rel = getReliabilityLabel(hAll.length);
     html += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:10px;">'
-      + '<div class="metric-card"><div class="metric-label">Ajuste global (Nivel 1)</div><div class="metric-val" style="color:' + (l1>=0?'#3B6D11':'#A32D2D') + ';">' + (l1>=0?'+':'') + l1 + ' pts</div></div>'
+      + '<div class="metric-card"><div class="metric-label">Ajuste global (Nivel 1)</div><div class="metric-val" style="color:' + (l1>=0?'#3B6D11':'#A32D2D') + ';">' + (l1>=0?'+':'') + l1 + ' pts</div><div style="font-size:10px;color:' + l1Rel.color + ';margin-top:2px;">' + l1Rel.text + '</div></div>'
       + '<div class="metric-card"><div class="metric-label">Apuestas con historial</div><div class="metric-val">' + hAll.length + '</div></div>'
       + '</div>';
     if (Object.keys(marketAdjs).length > 0) {
       html += '<p style="font-size:12px;font-weight:500;color:#555;margin-bottom:6px;">Por mercado (Nivel 2):</p><div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px;">';
       Object.entries(marketAdjs).forEach(function(e) {
         var clr = e[1]>=0?'#3B6D11':'#A32D2D', bg = e[1]>=0?'#EAF3DE':'#FCEBEB';
-        html += '<span style="background:' + bg + ';color:' + clr + ';font-size:12px;padding:3px 10px;border-radius:12px;font-weight:500;">' + e[0] + ': ' + (e[1]>=0?'+':'') + e[1] + ' pts</span>';
+        var catN = hAll.filter(function(b){ return getMarketCategory(b.market) === e[0]; }).length;
+        var catRel = getReliabilityLabel(catN);
+        html += '<span style="background:' + bg + ';color:' + clr + ';font-size:12px;padding:3px 10px;border-radius:12px;font-weight:500;">' + e[0] + ': ' + (e[1]>=0?'+':'') + e[1] + ' pts <span style="opacity:0.7;font-size:10px;">(n=' + catN + ', ' + catRel.text + ')</span></span>';
       });
       html += '</div>';
     } else {
@@ -4575,18 +4645,22 @@ function renderProAnalysis() {
       + '</div>';
     if (bt.isOverfit) {
       html += '<div style="background:#fff8e6;border:1px solid #f0d080;border-radius:8px;padding:10px 14px;font-size:12px;color:#854F0B;">El ROI cae mucho del set de entrenamiento al de prueba (diferencia de ' + bt.overfitGap.toFixed(1) + ' puntos). Esto sugiere que el modelo puede estar sobreajustado a patrones especificos de tus apuestas pasadas, no a una ventaja real.</div>';
+    } else if (bt.isReverseDivergence) {
+      html += '<div style="background:#fff8e6;border:1px solid #f0d080;border-radius:8px;padding:10px 14px;font-size:12px;color:#854F0B;">El ROI de prueba (' + bt.testResult.roi.toFixed(1) + '%) fue mucho mejor que el de entrenamiento (' + bt.trainResult.roi.toFixed(1) + '%) -- diferencia de ' + Math.abs(bt.overfitGap).toFixed(1) + ' puntos. No es sobreajuste en el sentido clasico, pero tampoco es una senal de consistencia: con ' + bt.testResult.n + ' jugadas en el set de prueba, es muy probable que sea ruido estadistico. No lo interpretes como confirmacion de que el modelo mejoro.</div>';
     } else {
-      html += '<div style="background:#eaf3de;border:1px solid #c0dd97;border-radius:8px;padding:10px 14px;font-size:12px;color:#3B6D11;">El ROI se mantiene consistente entre entrenamiento y prueba. No hay senales claras de sobreajuste.</div>';
+      html += '<div style="background:#eaf3de;border:1px solid #c0dd97;border-radius:8px;padding:10px 14px;font-size:12px;color:#3B6D11;">El ROI se mantiene relativamente consistente entre entrenamiento y prueba (diferencia de ' + Math.abs(bt.overfitGap).toFixed(1) + ' puntos). No hay senales claras de sobreajuste.</div>';
     }
     html += '</div>';
   }
 
   html += '<div class="card"><p class="section-label">Closing Line Value (CLV)</p>';
+  const covColor = clv.coveragePct >= 50 ? '#3B6D11' : clv.coveragePct >= 20 ? '#854F0B' : '#A32D2D';
+  const coverageLine = '<div style="background:#f5f5f0;border-radius:6px;padding:6px 10px;margin-bottom:8px;font-size:11px;color:#666;">Cobertura de CLV: <span style="color:' + covColor + ';font-weight:700;">' + clv.n + '/' + clv.resolvedCount + ' (' + clv.coveragePct + '%)</span> de tus apuestas resueltas tienen cuota de cierre registrada.' + (clv.coveragePct < 30 ? ' Registra mas para que este indicador sea confiable.' : '') + '</div>';
   if (!clv.hasData) {
-    html += '<p style="font-size:13px;color:#999;">Sin datos de CLV aun. El CLV se registra automaticamente cuando marcas el resultado de una apuesta y tienes la cuota de cierre disponible.</p>';
+    html += coverageLine + '<p style="font-size:13px;color:#999;">Sin datos de CLV aun. El CLV se registra automaticamente cuando marcas el resultado de una apuesta y tienes la cuota de cierre disponible.</p>';
   } else {
     const clvColor = clv.avgCLV >= 0 ? '#3B6D11' : '#A32D2D';
-    html += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px;">'
+    html += coverageLine + '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px;">'
       + '<div class="metric-card"><div class="metric-label">CLV promedio</div><div class="metric-val" style="color:' + clvColor + ';">' + (clv.avgCLV>=0?'+':'') + clv.avgCLV.toFixed(2) + '%</div></div>'
       + '<div class="metric-card"><div class="metric-label">% apuestas con CLV positivo</div><div class="metric-val">' + clv.positiveRate.toFixed(0) + '%</div></div>'
       + '</div>'
