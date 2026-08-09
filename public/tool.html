@@ -1075,7 +1075,7 @@ function placeBet(match, market, odds, confidence, amount, fixtureId, league){
   syncBankrollTxToCloud(tx);
 
   // También registrar en historial de apuestas
-  recordBet({match, market, odds, confidence, league}, sharedId);
+  recordBet({match, market, odds, confidence, league, amount}, sharedId);
 
   return { ok:true, tx, remaining: getRemainingBetsToday(bk) };
 }
@@ -1763,10 +1763,27 @@ function buildKellyEVPanel(bet, matchLabel, matchData, siblingRank){
   // del mismo partido (approximacion simple, no un Kelly multivariado completo).
   const rank = siblingRank || 1;
   const correlationDiscount = rank > 1 ? Math.pow(0.7, rank - 1) : 1;
-  const adjustedHalfKelly = +(kelly.halfKelly * correlationDiscount).toFixed(1);
-  const adjustedAmount = +(kelly.suggestedAmount * correlationDiscount).toFixed(2);
+
+  // Advertencia de calibracion: esta combinacion especifica de mercado+banda
+  // de confianza ha tenido un acierto real muy por debajo de lo predicho en
+  // tu historial. Antes esto solo mostraba un mensaje de texto -- pero el
+  // tamano de la apuesta no cambiaba, dejando en el usuario la responsabilidad
+  // de acordarse de reducir manualmente. Ahora, cuando la senal ya es
+  // confiable (reliability 'alta' o 'media'), se aplica una reduccion activa
+  // del stake, proporcional a que tan confiable es la señal.
+  const calWarning = getBetCalibrationWarning(bet);
+  const calibrationDiscount = calWarning
+    ? (calWarning.reliability === 'alta' ? 0.5 : calWarning.reliability === 'media' ? 0.65 : 0.8)
+    : 1;
+
+  const totalDiscount = correlationDiscount * calibrationDiscount;
+  const adjustedHalfKelly = +(kelly.halfKelly * totalDiscount).toFixed(1);
+  const adjustedAmount = +(kelly.suggestedAmount * totalDiscount).toFixed(2);
   const correlationNote = rank > 1
     ? `<div style="font-size:9px;color:#854F0B;margin-top:1px;">Ajustado ${Math.round((1-correlationDiscount)*100)}% por correlacion con otra jugada del mismo partido</div>`
+    : '';
+  const calibrationNote = calWarning
+    ? `<div style="font-size:9px;color:#A32D2D;margin-top:1px;">Reducido ${Math.round((1-calibrationDiscount)*100)}% por mal historial de calibracion en este mercado/banda</div>`
     : '';
 
   // Buscar mejor cuota real en odds comparison
@@ -1792,13 +1809,8 @@ function buildKellyEVPanel(bet, matchLabel, matchData, siblingRank){
   const evColor = ev>5?'#3B6D11':ev>0?'#854F0B':'#A32D2D';
   const evLabel = ev>5?'EV positivo ✓':ev>0?'EV marginal':'EV negativo ✗';
 
-  // Advertencia de calibracion: esta combinacion especifica de mercado+banda
-  // de confianza ha tenido un acierto real muy por debajo de lo predicho en
-  // tu historial. Se muestra aqui (no solo en Analisis Pro) porque es el
-  // momento en que realmente importa -- justo antes de decidir apostar.
-  const calWarning = getBetCalibrationWarning(bet);
   const calWarningHtml = calWarning ? `<div style="background:#FCEBEB;border:1px solid #f0c0c0;border-radius:8px;padding:8px 10px;margin-bottom:8px;font-size:11px;color:#A32D2D;">
-    ⚠️ Historicamente, jugadas de este tipo en esta banda de confianza aciertan ${Math.abs(calWarning.gap)} pts menos de lo predicho (n=${calWarning.n}, confiabilidad ${calWarning.reliability}). Tomalo con cautela.
+    ⚠️ Historicamente, jugadas de este tipo en esta banda de confianza aciertan ${Math.abs(calWarning.gap)} pts menos de lo predicho (n=${calWarning.n}, confiabilidad ${calWarning.reliability}). El stake sugerido ya fue reducido por esto.
   </div>` : '';
 
   return `${calWarningHtml}<div style="border-top:1px solid #f0f0f0;margin-top:8px;padding-top:8px;display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;">
@@ -1807,6 +1819,7 @@ function buildKellyEVPanel(bet, matchLabel, matchData, siblingRank){
       <div style="font-size:14px;font-weight:700;">${adjustedHalfKelly}%</div>
       <div style="font-size:11px;color:#185FA5;font-weight:600;">${currency} ${adjustedAmount.toFixed(2)}</div>
       ${correlationNote}
+      ${calibrationNote}
     </div>
     <div style="background:#f5f5f0;border-radius:6px;padding:6px 8px;text-align:center;">
       <div style="font-size:10px;color:#999;margin-bottom:2px;">Valor esperado</div>
@@ -3288,7 +3301,7 @@ function calcBets(m){
     });
   }
 
-  // Aplicar retroalimentacion automatica de 4 niveles
+  // Aplicar retroalimentacion automatica de 5 niveles
   const leagueKey = m.league || '';
   bets.forEach(function(b) {
     const feedbackAdj = applyFeedbackAdj(b, leagueKey);
@@ -3444,6 +3457,19 @@ function seedEloFromH2H(homeId, awayId, h2hMatches) {
 // 4. Correlacion de factores (que senales realmente predicen bien)
 
 // ── NIVEL 1: Calibracion global ──────────────────────────────────────────────
+// Tope de correccion dinamico segun tamaño de muestra: con poca muestra el
+// sesgo estimado puede ser ruido, asi que se limita mucho. Con muestra grande
+// la senal ya es confiable y se permite corregir mas. Los umbrales son
+// parametrizables porque el Nivel 1 (global) y el Nivel 2 (por mercado)
+// acumulan muestra a ritmos muy distintos -- una categoria de mercado rara
+// vez llega a los mismos volumenes que el total general.
+function getDynamicCap(n, baseCap, maxCap, thresholds) {
+  thresholds = thresholds || [50, 100];
+  if (n < thresholds[0]) return baseCap;
+  if (n < thresholds[1]) return Math.round(baseCap * 1.4);
+  return maxCap;
+}
+
 function getCalibrationAdj() {
   const h = getHistory().filter(function(b){ return b.result !== 'pending'; });
   if (h.length < 20) return 0;
@@ -3458,7 +3484,8 @@ function getCalibrationAdj() {
     count++;
   });
   if (!count) return 0;
-  return Math.max(-8, Math.min(8, Math.round((totalBias/count) * 40)));
+  const cap = getDynamicCap(h.length, 8, 15);
+  return Math.max(-cap, Math.min(cap, Math.round((totalBias/count) * 40)));
 }
 
 // Version "plot" de la calibracion: devuelve el detalle por banda
@@ -3503,8 +3530,11 @@ function getMarketCalibrationAdj(marketName) {
   const avgConf = inCat.reduce(function(s,b){ return s+(b.confidence||70); }, 0) / inCat.length / 100;
   const bias = realRate - avgConf;
 
-  // Aplicar hasta +/-10 puntos de ajuste por mercado
-  return Math.max(-10, Math.min(10, Math.round(bias * 45)));
+  // Tope dinamico: con mas muestra por categoria, se permite corregir mas
+  // (umbrales mas bajos que el Nivel 1 porque una categoria especifica nunca
+  // acumula tanta muestra como el total general).
+  const cap = getDynamicCap(inCat.length, 10, 16, [15, 30]);
+  return Math.max(-cap, Math.min(cap, Math.round(bias * 45)));
 }
 
 // ── ADVERTENCIA DE CALIBRACION POR JUGADA ────────────────────────────────────
@@ -3584,8 +3614,56 @@ function getFactorCorrelations() {
   return correlations;
 }
 
+// ── NIVEL 5: Cruce mercado x liga ────────────────────────────────────────────
+// Un mercado puede fallar mucho en una liga especifica y bien en otra --
+// mirar el mercado o la liga por separado puede esconder esto (una liga buena
+// y una mala se promedian y el problema real no se ve). Requiere mas muestra
+// que los niveles individuales porque es una interseccion mas angosta.
+function getMarketLeagueCalibrationAdj(market, leagueKey) {
+  if (!leagueKey) return 0;
+  const h = getHistory().filter(function(b){ return b.result !== 'pending'; });
+  if (h.length < 30) return 0;
+
+  const targetCat = getMarketCategory(market);
+  const inCombo = h.filter(function(b){
+    return getMarketCategory(b.market) === targetCat && b.league === leagueKey;
+  });
+  if (inCombo.length < 6) return 0;
+
+  const realRate = inCombo.filter(function(b){ return b.result === 'win'; }).length / inCombo.length;
+  const avgConf = inCombo.reduce(function(s,b){ return s+(b.confidence||70); }, 0) / inCombo.length / 100;
+  const bias = realRate - avgConf;
+  return Math.max(-8, Math.min(8, Math.round(bias * 40)));
+}
+
+// Devuelve las combinaciones mercado x liga con suficiente muestra (>=6) y
+// sesgo negativo notable (<=-15%), para mostrar en Analisis Pro cuales
+// combinaciones especificas estan fallando mas de lo esperado.
+function getWorstMarketLeagueCombos() {
+  const h = getHistory().filter(function(b){ return b.result !== 'pending' && b.league; });
+  if (h.length < 30) return [];
+  const combos = {};
+  h.forEach(function(b) {
+    const cat = getMarketCategory(b.market);
+    const key = cat + '|' + b.league;
+    if (!combos[key]) combos[key] = { cat: cat, league: b.league, total: 0, wins: 0, confSum: 0 };
+    combos[key].total++;
+    combos[key].confSum += (b.confidence||70);
+    if (b.result === 'win') combos[key].wins++;
+  });
+  return Object.values(combos)
+    .filter(function(c){ return c.total >= 6; })
+    .map(function(c) {
+      const realRate = c.wins / c.total;
+      const avgConf = c.confSum / c.total / 100;
+      return { cat: c.cat, league: getLeagueLabel(c.league), n: c.total, realPct: Math.round(realRate*100), predPct: Math.round(avgConf*100), gap: Math.round((realRate-avgConf)*100) };
+    })
+    .filter(function(c){ return c.gap <= -15; })
+    .sort(function(a,b){ return a.gap - b.gap; });
+}
+
 // ── APLICADOR COMBINADO ───────────────────────────────────────────────────────
-// Aplica los 4 niveles de ajuste a una apuesta individual.
+// Aplica los 5 niveles de ajuste a una apuesta individual.
 // Se llama desde calcBets para cada jugada generada.
 function applyFeedbackAdj(bet, leagueKey) {
   const l1 = getCalibrationAdj();
@@ -3600,8 +3678,13 @@ function applyFeedbackAdj(bet, leagueKey) {
   });
   l4 = Math.max(-8, Math.min(8, l4));
 
+  // Nivel 5: cruce mercado x liga -- peso menor porque es la interseccion
+  // mas especifica y con menos muestra, pero puede detectar problemas que
+  // los niveles 2 y 3 por separado no ven.
+  const l5 = getMarketLeagueCalibrationAdj(bet.market, leagueKey);
+
   // Combinar: nivel 1 pesa mas, los demas suman con menor peso
-  const total = l1 + l2 * 0.7 + l3 * 0.6 + l4 * 0.5;
+  const total = l1 + l2 * 0.7 + l3 * 0.6 + l4 * 0.5 + l5 * 0.5;
   return Math.max(-15, Math.min(15, Math.round(total)));
 }
 
@@ -3986,12 +4069,13 @@ function getRoiByLeague(historyOverride) {
   const byLeague = {};
   h.forEach(function(b) {
     const league = getLeagueLabel(b.league);
-    if (!byLeague[league]) byLeague[league] = { wins: 0, total: 0, staked: 0, returned: 0 };
+    if (!byLeague[league]) byLeague[league] = { wins: 0, total: 0, unitsPnl: 0 };
     byLeague[league].total++;
-    byLeague[league].staked += b.amount || 0;
     if (b.result === 'win') {
       byLeague[league].wins++;
-      byLeague[league].returned += (b.amount || 0) * b.odds;
+      byLeague[league].unitsPnl += (b.odds - 1);
+    } else {
+      byLeague[league].unitsPnl -= 1;
     }
   });
   return Object.entries(byLeague).map(function(e) {
@@ -4000,7 +4084,12 @@ function getRoiByLeague(historyOverride) {
       league: e[0],
       total: d.total,
       winRate: d.total ? Math.round(d.wins/d.total*100) : 0,
-      roi: d.staked > 0 ? parseFloat(((d.returned-d.staked)/d.staked*100).toFixed(1)) : 0,
+      // BUGFIX: antes usaba b.amount (staked/returned) para el ROI, pero
+      // b.amount NUNCA se pasa al registrar la apuesta desde placeBet() --
+      // siempre quedaba en 0, asi que el ROI siempre salia +0% sin importar
+      // el resultado real. Ahora usa el mismo stake plano de 1 unidad por
+      // apuesta que ya usa getStats() -- consistente y no depende de amount.
+      roi: d.total ? +((d.unitsPnl/d.total)*100).toFixed(1) : 0,
     };
   }).sort(function(a,b){ return b.roi - a.roi; });
 }
@@ -4621,6 +4710,18 @@ function renderProAnalysis() {
       html += '</div>';
     } else {
       html += '<p style="font-size:12px;color:#999;margin-bottom:8px;">Por mercado: acumula mas apuestas por categoria para activar.</p>';
+    }
+    var worstCombos = getWorstMarketLeagueCombos();
+    if (worstCombos.length > 0) {
+      html += '<p style="font-size:12px;font-weight:500;color:#555;margin-bottom:6px;">Combinaciones mercado × liga con peor historial (Nivel 5):</p>';
+      worstCombos.slice(0,5).forEach(function(c) {
+        html += '<div style="display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px solid #f5f5f0;font-size:11px;">'
+          + '<span>' + c.cat + ' · ' + c.league + '</span>'
+          + '<span style="color:#999;">n=' + c.n + ' · real ' + c.realPct + '% vs pred ' + c.predPct + '%</span>'
+          + '<span style="color:#A32D2D;font-weight:700;">' + c.gap + ' pts</span>'
+          + '</div>';
+      });
+      html += '<p style="font-size:10px;color:#999;margin-top:4px;margin-bottom:8px;">Un mercado puede verse bien en general pero fallar mucho en una liga especifica -- esto lo hace visible.</p>';
     }
     if (Object.keys(factorCorr).length > 0) {
       html += '<p style="font-size:12px;font-weight:500;color:#555;margin-bottom:6px;">Factores mas predictivos (Nivel 4):</p><div style="display:flex;flex-wrap:wrap;gap:6px;">';
