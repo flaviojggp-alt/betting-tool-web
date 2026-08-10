@@ -1171,12 +1171,13 @@ async function checkPendingBets() {
     + (evaluable.length ? evaluable.map(function(s) {
         const colorBg = s.won ? '#EAF3DE' : '#FCEBEB';
         const colorTx = s.won ? '#3B6D11' : '#A32D2D';
-        return '<div style="background:' + colorBg + ';border-radius:8px;padding:8px 10px;margin-bottom:8px;">'
+        const itemId = 'verify-item-' + s.tx.id;
+        return '<div id="' + itemId + '" style="background:' + colorBg + ';border-radius:8px;padding:8px 10px;margin-bottom:8px;">'
           + '<div style="font-size:12px;font-weight:600;">' + s.tx.match + '</div>'
           + '<div style="font-size:11px;color:#555;margin-bottom:4px;">' + s.tx.market + ' · ' + s.note + '</div>'
           + '<div style="display:flex;justify-content:space-between;align-items:center;">'
           + '<span style="font-size:12px;font-weight:700;color:' + colorTx + ';">Sugerido: ' + (s.won?'✓ Gano':'✗ Perdio') + '</span>'
-          + '<button onclick="settleBetPrompt(' + s.tx.id + ',' + s.won + ');document.getElementById(\'verify-overlay\')?.remove();" style="font-size:11px;background:#1a1a1a;color:#fff;border:none;border-radius:6px;padding:5px 12px;cursor:pointer;">Confirmar</button>'
+          + '<button onclick="confirmVerifiedBet(' + s.tx.id + ',' + s.won + ',\'' + itemId + '\')" style="font-size:11px;background:#1a1a1a;color:#fff;border:none;border-radius:6px;padding:5px 12px;cursor:pointer;">Confirmar</button>'
           + '</div></div>';
       }).join('') : '<p style="font-size:12px;color:#999;">Ninguna apuesta pendiente tiene un partido ya finalizado todavia.</p>')
     + '<button id="verify-close" style="width:100%;margin-top:6px;background:#f5f5f0;border:1px solid #ddd;border-radius:8px;padding:8px;font-size:13px;cursor:pointer;">Cerrar</button>'
@@ -1186,6 +1187,20 @@ async function checkPendingBets() {
   overlay.querySelector('#verify-close').onclick = function(){ overlay.remove(); };
 }
 
+// Confirma una sugerencia individual del panel de "Verificar resultados
+// pendientes" SIN cerrar el resto de la ventana -- antes, confirmar una
+// jugada cerraba toda la ventana y habia que volver a correr la
+// verificacion completa para confirmar la siguiente. Ahora solo se quita
+// esa tarjeta especifica; el resto de sugerencias se mantienen visibles.
+function confirmVerifiedBet(txId, won, itemId) {
+  settleBetPrompt(txId, won);
+  const item = document.getElementById(itemId);
+  if (item) item.remove();
+  const overlay = document.getElementById('verify-overlay');
+  if (overlay && !overlay.querySelector('[id^="verify-item-"]')) {
+    setTimeout(function(){ overlay.remove(); }, 400);
+  }
+}
 // Empareja el texto de un mercado con la linea de cierre capturada
 // automaticamente. Solo soporta victoria (h2h) y goles totales -- corners y
 // tarjetas normalmente requieren un market key especial que no se solicita
@@ -3313,7 +3328,9 @@ function calcBets(m){
       }
     }
   });
-  return bets.sort((a,b)=>b.confidence-a.confidence);
+  const activeBets = bets.filter(function(b){ return !shouldBlockBet(b); });
+  m.blockedBets = bets.filter(shouldBlockBet).map(function(b){ return { market: b.market, confidence: b.confidence }; });
+  return activeBets.sort((a,b)=>b.confidence-a.confidence);
 }
 
 // ── INTERVALO DE CONFIANZA ───────────────────────────────────────────────────
@@ -3474,18 +3491,23 @@ function getCalibrationAdj() {
   const h = getHistory().filter(function(b){ return b.result !== 'pending'; });
   if (h.length < 20) return 0;
   const bands = [{min:60,max:70},{min:70,max:80},{min:80,max:95}];
-  let totalBias = 0, count = 0;
+  // MEJORA: antes se promediaba el sesgo de cada banda por igual sin importar
+  // su tamano de muestra -- una banda de 9 apuestas pesaba lo mismo que una
+  // de 93. Ahora se pondera por tamano de muestra.
+  let weightedBiasSum = 0, totalWeight = 0;
   bands.forEach(function(band) {
     const inBand = h.filter(function(b){ return (b.confidence||70) >= band.min && (b.confidence||70) < band.max; });
     if (inBand.length < 5) return;
     const realRate = inBand.filter(function(b){ return b.result === 'win'; }).length / inBand.length;
     const expectedRate = (band.min + band.max) / 2 / 100;
-    totalBias += (realRate - expectedRate);
-    count++;
+    const bias = realRate - expectedRate;
+    weightedBiasSum += bias * inBand.length;
+    totalWeight += inBand.length;
   });
-  if (!count) return 0;
+  if (!totalWeight) return 0;
+  const avgBias = weightedBiasSum / totalWeight;
   const cap = getDynamicCap(h.length, 8, 15);
-  return Math.max(-cap, Math.min(cap, Math.round((totalBias/count) * 40)));
+  return Math.max(-cap, Math.min(cap, Math.round(avgBias * 40)));
 }
 
 // Version "plot" de la calibracion: devuelve el detalle por banda
@@ -3559,6 +3581,16 @@ function getBetCalibrationWarning(bet) {
     };
   }
   return null;
+}
+
+// ── BLOQUEO AUTOMATICO POR PATRON CONFIRMADO ────────────────────────────────
+// Escala la advertencia a un bloqueo total cuando el patron es severo y ya
+// esta bien respaldado por muestra. No esta hardcodeado a "corners" -- se
+// adapta solo si el patron mejora o aparece en otro mercado.
+function shouldBlockBet(bet) {
+  const warning = getBetCalibrationWarning(bet);
+  if (!warning) return false;
+  return bet.confidence >= 80 && Math.abs(warning.gap) >= 40 && warning.reliability !== 'baja';
 }
 
 // ── NIVEL 3: Calibracion por liga ────────────────────────────────────────────
@@ -3636,10 +3668,9 @@ function getMarketLeagueCalibrationAdj(market, leagueKey) {
   return Math.max(-8, Math.min(8, Math.round(bias * 40)));
 }
 
-// Devuelve las combinaciones mercado x liga con suficiente muestra (>=6) y
-// sesgo negativo notable (<=-15%), para mostrar en Analisis Pro cuales
-// combinaciones especificas estan fallando mas de lo esperado.
-function getWorstMarketLeagueCombos() {
+// Devuelve TODAS las combinaciones mercado x liga con muestra suficiente
+// (>=6), sin filtrar por que tan malas sean.
+function getAllMarketLeagueCombos() {
   const h = getHistory().filter(function(b){ return b.result !== 'pending' && b.league; });
   if (h.length < 30) return [];
   const combos = {};
@@ -3658,8 +3689,11 @@ function getWorstMarketLeagueCombos() {
       const avgConf = c.confSum / c.total / 100;
       return { cat: c.cat, league: getLeagueLabel(c.league), n: c.total, realPct: Math.round(realRate*100), predPct: Math.round(avgConf*100), gap: Math.round((realRate-avgConf)*100) };
     })
-    .filter(function(c){ return c.gap <= -15; })
     .sort(function(a,b){ return a.gap - b.gap; });
+}
+
+function getWorstMarketLeagueCombos() {
+  return getAllMarketLeagueCombos().filter(function(c){ return c.gap <= -15; });
 }
 
 // ── APLICADOR COMBINADO ───────────────────────────────────────────────────────
@@ -4203,6 +4237,10 @@ function updateProgressBar(pct, label) {
 function buildExecutiveSummary(m, bets) {
   if (!bets || !bets.length) return '';
 
+  const blockedNotice = (m.blockedBets && m.blockedBets.length) ? `<div style="background:#f5f5f0;border-radius:8px;padding:8px 10px;margin-bottom:10px;font-size:11px;color:#666;">
+    🚫 ${m.blockedBets.length} jugada(s) no se muestran por coincidir con un patron de calibracion ya confirmado como severo (${m.blockedBets.map(function(b){ return b.market + ' ' + b.confidence + '%'; }).join(', ')}).
+  </div>` : '';
+
   // Calcular confianza global del modelo para este partido
   const topBets = bets.slice(0, 3);
   const avgConf = Math.round(topBets.reduce(function(s,b){ return s+b.confidence; }, 0) / topBets.length);
@@ -4305,6 +4343,7 @@ function buildExecutiveSummary(m, bets) {
     + '</div>'
     + clvLine
     + pinnacleCompareLine
+    + blockedNotice
     // Signals
     + (signals.length ? '<div style="margin-bottom:8px;"><span style="font-size:11px;color:#3B6D11;font-weight:500;">A favor: </span>'
     + signals.map(function(s){ return '<span style="font-size:11px;background:#EAF3DE;color:#3B6D11;padding:1px 7px;border-radius:10px;margin-right:4px;">' + s + '</span>'; }).join('')
@@ -4722,6 +4761,20 @@ function renderProAnalysis() {
           + '</div>';
       });
       html += '<p style="font-size:10px;color:#999;margin-top:4px;margin-bottom:8px;">Un mercado puede verse bien en general pero fallar mucho en una liga especifica -- esto lo hace visible.</p>';
+    }
+    var allCombos = getAllMarketLeagueCombos();
+    if (allCombos.length > 0) {
+      html += '<details style="margin-bottom:10px;"><summary style="font-size:12px;color:#185FA5;cursor:pointer;margin-bottom:6px;">Ver matriz completa mercado × liga (' + allCombos.length + ' combinaciones)</summary>';
+      html += '<div style="max-height:280px;overflow-y:auto;margin-top:6px;">';
+      allCombos.forEach(function(c) {
+        var gapColor = c.gap <= -15 ? '#A32D2D' : c.gap >= 10 ? '#3B6D11' : '#854F0B';
+        html += '<div style="display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px solid #f5f5f0;font-size:11px;">'
+          + '<span>' + c.cat + ' · ' + c.league + '</span>'
+          + '<span style="color:#999;">n=' + c.n + ' · real ' + c.realPct + '% vs pred ' + c.predPct + '%</span>'
+          + '<span style="color:' + gapColor + ';font-weight:700;">' + (c.gap>=0?'+':'') + c.gap + ' pts</span>'
+          + '</div>';
+      });
+      html += '</div></details>';
     }
     if (Object.keys(factorCorr).length > 0) {
       html += '<p style="font-size:12px;font-weight:500;color:#555;margin-bottom:6px;">Factores mas predictivos (Nivel 4):</p><div style="display:flex;flex-wrap:wrap;gap:6px;">';
