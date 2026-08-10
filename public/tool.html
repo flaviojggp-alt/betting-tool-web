@@ -604,6 +604,25 @@ function getFilteredHistory(days) {
   return h.filter(function(b){ return new Date(b.date).getTime() >= cutoff; });
 }
 
+// ── INTERVALO DE CONFIANZA ESTADISTICO (Wilson score) ───────────────────────
+// Cualquier % de acierto que se muestra es una ESTIMACION basada en una
+// muestra, no el valor real -- con pocas apuestas, el rango real posible es
+// mucho mas ancho de lo que el numero puntual sugiere. Wilson score es el
+// metodo estandar para esto (mas confiable que la aproximacion normal
+// simple, especialmente con muestras chicas o tasas cerca de 0%/100%).
+function wilsonInterval(wins, total, z) {
+  z = z || 1.96; // 95% de confianza
+  if (!total) return { low: 0, high: 0 };
+  const p = wins / total;
+  const denom = 1 + (z*z)/total;
+  const center = (p + (z*z)/(2*total)) / denom;
+  const margin = (z * Math.sqrt((p*(1-p)/total) + (z*z)/(4*total*total))) / denom;
+  return {
+    low: +Math.max(0, (center-margin)*100).toFixed(1),
+    high: +Math.min(100, (center+margin)*100).toFixed(1),
+  };
+}
+
 function getStats(historyOverride){
   const full = historyOverride || getHistory();
   const h = full.filter(b=>b.result!=='pending');
@@ -617,7 +636,7 @@ function getStats(historyOverride){
     byConf[bucket].total++;
     if(b.result==='win') byConf[bucket].wins++;
   });
-  return { total:h.length, wins, losses:h.length-wins, winRate:+(wins/h.length*100).toFixed(1), roi:+roi.toFixed(1), byConf, pending: full.filter(b=>b.result==='pending').length };
+  return { total:h.length, wins, losses:h.length-wins, winRate:+(wins/h.length*100).toFixed(1), winRateCI: wilsonInterval(wins, h.length), roi:+roi.toFixed(1), byConf, pending: full.filter(b=>b.result==='pending').length };
 }
 
 // Kelly Criterion — tamaño óptimo de apuesta
@@ -1708,20 +1727,24 @@ function renderHistory(){
     mr.innerHTML=filterBar+`<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:1rem;">
       <div class="metric-card"><div class="metric-label">Total registradas</div><div class="metric-val">${stats.total}</div></div>
       <div class="metric-card"><div class="metric-label">Aciertos</div><div class="metric-val" style="color:#3B6D11;">${stats.wins}</div></div>
-      <div class="metric-card"><div class="metric-label">% acierto</div><div class="metric-val">${stats.winRate}%</div></div>
+      <div class="metric-card"><div class="metric-label">% acierto</div><div class="metric-val">${stats.winRate}%</div><div style="font-size:9px;color:#999;margin-top:2px;">IC 95%: ${stats.winRateCI.low}-${stats.winRateCI.high}%</div></div>
       <div class="metric-card"><div class="metric-label">ROI</div><div class="metric-val" style="color:${roiColor};">${stats.roi>0?'+':''}${stats.roi}%</div></div>
     </div>
     ${stats.pending>0?`<div style="background:#E6F1FB;border-radius:8px;padding:8px 12px;font-size:12px;color:#185FA5;margin-bottom:10px;">${stats.pending} jugada(s) pendiente(s) de resultado</div>`:''}
     <div style="background:#f5f5f0;border-radius:8px;padding:10px 12px;margin-bottom:10px;">
       <p class="section-label" style="margin-bottom:8px;">Precisión del sistema por nivel de confianza</p>
-      ${Object.entries(stats.byConf).sort((a,b)=>+a[0]-+b[0]).map(([conf,data])=>`
-        <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;">
+      ${Object.entries(stats.byConf).sort((a,b)=>+a[0]-+b[0]).map(([conf,data])=>{
+        const ci = wilsonInterval(data.wins, data.total);
+        return `
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:2px;">
           <span style="font-size:12px;color:#555;min-width:70px;">${conf}-${+conf+9}% conf.</span>
           <div style="flex:1;height:8px;background:#e5e5e5;border-radius:4px;overflow:hidden;">
             <div style="width:${Math.round(data.wins/data.total*100)}%;height:100%;background:${data.wins/data.total>=0.6?'#3B6D11':data.wins/data.total>=0.4?'#BA7517':'#A32D2D'};border-radius:4px;"></div>
           </div>
           <span style="font-size:12px;font-weight:600;min-width:60px;">${data.wins}/${data.total} (${Math.round(data.wins/data.total*100)}%)</span>
-        </div>`).join('')}
+        </div>
+        <div style="margin-bottom:6px;padding-left:78px;"><span style="font-size:9px;color:#999;">IC 95%: ${ci.low}-${ci.high}%</span></div>`;
+      }).join('')}
     ${leaguePanel}
     <div style="background:#fff;border:1px solid #e5e5e5;border-radius:10px;padding:12px;margin-top:10px;">
       <p style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:0.06em;margin-bottom:8px;">Evolucion del ROI acumulado</p>
@@ -1791,7 +1814,12 @@ function buildKellyEVPanel(bet, matchLabel, matchData, siblingRank){
     ? (calWarning.reliability === 'alta' ? 0.5 : calWarning.reliability === 'media' ? 0.65 : 0.8)
     : 1;
 
-  const totalDiscount = correlationDiscount * calibrationDiscount;
+  // Riesgo de cartera: descuento adicional si ya hay otras apuestas
+  // pendientes en la misma categoria de mercado (aunque sean de otros
+  // partidos) -- ver getPortfolioRiskDiscount para el detalle.
+  const portfolioRisk = getPortfolioRiskDiscount(bet);
+
+  const totalDiscount = correlationDiscount * calibrationDiscount * portfolioRisk.discount;
   const adjustedHalfKelly = +(kelly.halfKelly * totalDiscount).toFixed(1);
   const adjustedAmount = +(kelly.suggestedAmount * totalDiscount).toFixed(2);
   const correlationNote = rank > 1
@@ -1800,23 +1828,39 @@ function buildKellyEVPanel(bet, matchLabel, matchData, siblingRank){
   const calibrationNote = calWarning
     ? `<div style="font-size:9px;color:#A32D2D;margin-top:1px;">Reducido ${Math.round((1-calibrationDiscount)*100)}% por mal historial de calibracion en este mercado/banda</div>`
     : '';
+  const portfolioNote = portfolioRisk.count > 0
+    ? `<div style="font-size:9px;color:#185FA5;margin-top:1px;">Reducido ${Math.round((1-portfolioRisk.discount)*100)}% por ${portfolioRisk.count} apuesta(s) pendiente(s) ya abiertas en el mismo mercado</div>`
+    : '';
 
-  // Buscar mejor cuota real en odds comparison
+  // Buscar mejor cuota real en odds comparison -- matcher sistematico que
+  // cubre victoria, empate, y goles con linea especifica (usa el "point"
+  // que el proxy ahora preserva). Cubre todos los mercados donde The Odds
+  // API SI tiene datos (h2h, totals de goles) -- corners/tarjetas siguen
+  // sin cobertura real de mercado, no es limitacion de este matcher.
   let bestRealOdds = null, bestBookmaker = null;
-  if(matchData?.oddsComparison?.found && matchData.oddsComparison.bestOdds) {
-    const marketKey = bet.market.toLowerCase().includes('2.5')&&bet.market.toLowerCase().includes('más') ? 'over_2.5' :
-                      bet.market.toLowerCase().includes('2.5')&&bet.market.toLowerCase().includes('menos') ? 'under_2.5' : null;
-    // Try to find matching odds
+  if (matchData?.oddsComparison?.found && matchData.oddsComparison.bestOdds) {
     const allBest = matchData.oddsComparison.bestOdds || [];
-    const homeTeam = matchData?.home?.name||'';
-    const awayTeam = matchData?.away?.name||'';
-    const matchingOdd = allBest.find(b =>
-      (bet.market.includes(homeTeam) && b.outcome===homeTeam) ||
-      (bet.market.includes(awayTeam) && b.outcome===awayTeam) ||
-      (bet.market.includes('2.5') && b.outcome && b.outcome.includes('2.5')) ||
-      (bet.market.toLowerCase().includes('tarjeta') && b.market==='bookie_cards')
-    );
-    if(matchingOdd) { bestRealOdds=matchingOdd.price; bestBookmaker=matchingOdd.bookmaker; }
+    const homeTeam = matchData?.home?.name || '';
+    const awayTeam = matchData?.away?.name || '';
+    const mkt = bet.market.toLowerCase();
+    const lineMatch = mkt.match(/([\d.]+)/);
+    const line = lineMatch ? lineMatch[1] : null;
+
+    let matchingOdd = null;
+    if (mkt.startsWith('victoria ')) {
+      const teamName = bet.market.slice(9).trim();
+      const outcomeTeam = teamName.includes(homeTeam.split(' ')[0]) ? homeTeam : teamName.includes(awayTeam.split(' ')[0]) ? awayTeam : null;
+      if (outcomeTeam) matchingOdd = allBest.find(function(b){ return b.market === 'h2h' && b.outcome === outcomeTeam; });
+    } else if (mkt.includes('más de') && line) {
+      matchingOdd = allBest.find(function(b){ return b.market === 'totals' && b.outcome === ('Over ' + line); })
+        || allBest.find(function(b){ return b.market === 'totals' && b.outcome === 'Over'; }); // fallback si el point no vino
+    } else if (mkt.includes('menos de') && line) {
+      matchingOdd = allBest.find(function(b){ return b.market === 'totals' && b.outcome === ('Under ' + line); })
+        || allBest.find(function(b){ return b.market === 'totals' && b.outcome === 'Under'; });
+    } else if (mkt.includes('empate')) {
+      matchingOdd = allBest.find(function(b){ return b.market === 'h2h' && b.outcome === 'Draw'; });
+    }
+    if (matchingOdd) { bestRealOdds = matchingOdd.price; bestBookmaker = matchingOdd.bookmaker; }
   }
 
   const realOdds = bestRealOdds || bet.odds;
@@ -1835,6 +1879,7 @@ function buildKellyEVPanel(bet, matchLabel, matchData, siblingRank){
       <div style="font-size:11px;color:#185FA5;font-weight:600;">${currency} ${adjustedAmount.toFixed(2)}</div>
       ${correlationNote}
       ${calibrationNote}
+      ${portfolioNote}
     </div>
     <div style="background:#f5f5f0;border-radius:6px;padding:6px 8px;text-align:center;">
       <div style="font-size:10px;color:#999;margin-bottom:2px;">Valor esperado</div>
@@ -3537,6 +3582,26 @@ function getMarketCategory(market) {
   return 'other';
 }
 
+// ── RIESGO DE CARTERA (aproximacion) ─────────────────────────────────────────
+// Un calculo de covarianza real necesitaria mucha mas muestra que la que hay
+// hoy. En su lugar, esta es una aproximacion practica y defendible: cuenta
+// cuantas apuestas YA PENDIENTES (sin resolver todavia, de cualquier partido)
+// comparten la misma categoria de mercado que la jugada nueva. Tener varias
+// apuestas simultaneas en el mismo mercado concentra el riesgo en un factor
+// comun (arbitraje, clima regional, etc.), aunque no sean el mismo evento --
+// por eso se reduce el stake progresivamente, igual en espiritu al descuento
+// por correlacion del mismo partido.
+function getPortfolioRiskDiscount(bet) {
+  const bk = getBK();
+  const cat = getMarketCategory(bet.market);
+  const samePendingCount = (bk.transactions || []).filter(function(t){
+    return t.status === 'pending' && getMarketCategory(t.market) === cat;
+  }).length;
+  if (samePendingCount === 0) return { discount: 1, count: 0 };
+  const discount = Math.max(0.5, 1 - samePendingCount * 0.1);
+  return { discount: discount, count: samePendingCount };
+}
+
 // ── NIVEL 2: Calibracion por tipo de mercado ─────────────────────────────────
 // Detecta si el modelo sobreestima sistematicamente ciertos mercados.
 // Ej: si "mas de 2.5 goles" tiene 40% de acierto real vs 70% predicho -> -12 pts
@@ -3687,7 +3752,8 @@ function getAllMarketLeagueCombos() {
     .map(function(c) {
       const realRate = c.wins / c.total;
       const avgConf = c.confSum / c.total / 100;
-      return { cat: c.cat, league: getLeagueLabel(c.league), n: c.total, realPct: Math.round(realRate*100), predPct: Math.round(avgConf*100), gap: Math.round((realRate-avgConf)*100) };
+      const ci = wilsonInterval(c.wins, c.total);
+      return { cat: c.cat, league: getLeagueLabel(c.league), n: c.total, realPct: Math.round(realRate*100), predPct: Math.round(avgConf*100), gap: Math.round((realRate-avgConf)*100), ci: ci };
     })
     .sort(function(a,b){ return a.gap - b.gap; });
 }
@@ -4768,10 +4834,13 @@ function renderProAnalysis() {
       html += '<div style="max-height:280px;overflow-y:auto;margin-top:6px;">';
       allCombos.forEach(function(c) {
         var gapColor = c.gap <= -15 ? '#A32D2D' : c.gap >= 10 ? '#3B6D11' : '#854F0B';
-        html += '<div style="display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px solid #f5f5f0;font-size:11px;">'
+        html += '<div style="padding:5px 0;border-bottom:1px solid #f5f5f0;font-size:11px;">'
+          + '<div style="display:flex;justify-content:space-between;">'
           + '<span>' + c.cat + ' · ' + c.league + '</span>'
           + '<span style="color:#999;">n=' + c.n + ' · real ' + c.realPct + '% vs pred ' + c.predPct + '%</span>'
           + '<span style="color:' + gapColor + ';font-weight:700;">' + (c.gap>=0?'+':'') + c.gap + ' pts</span>'
+          + '</div>'
+          + '<div style="font-size:9px;color:#bbb;">IC 95% del acierto real: ' + c.ci.low + '-' + c.ci.high + '%</div>'
           + '</div>';
       });
       html += '</div></details>';
