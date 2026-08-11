@@ -1374,6 +1374,48 @@ function getBKStats(bk){
   return { totalBets:bets.length, settledBets:settled.length, wonBets:won.length, winRate:settled.length?+(won.length/settled.length*100).toFixed(1):0, totalStaked:+totalStaked.toFixed(2), totalReturned:+totalReturned.toFixed(2), roi, growth, pending:bets.filter(t=>t.status==='pending').length };
 }
 
+function getSyncDiscrepancies() {
+  const bk = getBK();
+  const bkBets = (bk.transactions || []).filter(function(t){ return t.type === 'bet'; });
+  const histBets = getHistory();
+  const bkIds = new Set(bkBets.map(function(t){ return t.id; }));
+  const histIds = new Set(histBets.map(function(b){ return b.id; }));
+  const inBkNotHist = bkBets.filter(function(t){ return !histIds.has(t.id); });
+  const inHistNotBk = histBets.filter(function(b){ return !bkIds.has(b.id); });
+  return {
+    bkTotal: bkBets.length,
+    histTotal: histBets.length,
+    inBkNotHist: inBkNotHist.map(function(t){ return { id: t.id, date: t.date, match: t.match, market: t.market, amount: t.amount, status: t.status }; }),
+    inHistNotBk: inHistNotBk.map(function(b){ return { id: b.id, date: b.date, match: b.match, market: b.market, confidence: b.confidence, status: b.result }; }),
+  };
+}
+
+function showSyncDiagnostic() {
+  const d = getSyncDiscrepancies();
+  const overlay = document.createElement('div');
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:100000;display:flex;align-items:flex-start;justify-content:center;overflow-y:auto;padding:20px 0;';
+  const fmt = function(list) {
+    if (!list.length) return '<p style="font-size:12px;color:#999;">Ninguna.</p>';
+    return list.map(function(x) {
+      const d2 = x.date ? new Date(x.date).toLocaleDateString('es', {day:'2-digit',month:'short',year:'numeric'}) : '?';
+      return '<div style="padding:6px 0;border-bottom:1px solid #f5f5f0;font-size:11px;">'
+        + '<div style="font-weight:600;">' + (x.match||'?') + ' · ' + (x.market||'?') + '</div>'
+        + '<div style="color:#999;">' + d2 + ' · estado: ' + (x.status||'?') + (x.amount!=null ? ' · monto: ' + x.amount : '') + (x.confidence!=null ? ' · conf: ' + x.confidence + '%' : '') + ' · id: ' + x.id + '</div>'
+        + '</div>';
+    }).join('');
+  };
+  overlay.innerHTML = '<div style="background:#fff;border-radius:14px;padding:1.25rem;max-width:460px;width:92%;box-shadow:0 8px 32px rgba(0,0,0,.18);">'
+    + '<p style="font-size:14px;font-weight:600;margin-bottom:4px;">Diagnóstico de sincronización</p>'
+    + '<p style="font-size:11px;color:#999;margin-bottom:12px;">Banca: ' + d.bkTotal + ' apuestas · Historial: ' + d.histTotal + ' apuestas · Diferencia: ' + Math.abs(d.bkTotal - d.histTotal) + '</p>'
+    + '<p style="font-size:12px;font-weight:600;color:#854F0B;margin-bottom:6px;">En Banca pero NO en Historial (' + d.inBkNotHist.length + '):</p>'
+    + fmt(d.inBkNotHist)
+    + '<p style="font-size:12px;font-weight:600;color:#854F0B;margin-top:12px;margin-bottom:6px;">En Historial pero NO en Banca (' + d.inHistNotBk.length + '):</p>'
+    + fmt(d.inHistNotBk)
+    + '<button id="sync-diag-close" style="width:100%;margin-top:12px;background:#f5f5f0;border:1px solid #ddd;border-radius:8px;padding:8px;font-size:13px;cursor:pointer;">Cerrar</button>'
+    + '</div>';
+  document.body.appendChild(overlay);
+  overlay.querySelector('#sync-diag-close').onclick = function(){ overlay.remove(); };
+}
 function renderBankroll(){
   const bk = getBK();
   const stats = getBKStats(bk);
@@ -1593,6 +1635,11 @@ function renderBankroll(){
         <div class="metric-card"><div class="metric-label">Total retornado</div><div class="metric-val">${bk.currency}${stats.totalReturned}</div></div>
         <div class="metric-card"><div class="metric-label">Pendientes</div><div class="metric-val" style="color:#185FA5;">${stats.pending}</div></div>
       </div>
+      ${(function(){
+        const d = getSyncDiscrepancies();
+        if (d.bkTotal === d.histTotal) return '';
+        return `<button onclick="showSyncDiagnostic()" style="width:100%;margin-top:10px;background:#FFF5E6;border:1px solid #f0d080;color:#854F0B;border-radius:8px;padding:8px;font-size:12px;cursor:pointer;">⚠️ Banca y Historial no coinciden (${d.bkTotal} vs ${d.histTotal}) — ver diagnóstico</button>`;
+      })()}
     </div>
 
     <!-- CONFIGURACIÓN -->
@@ -1896,7 +1943,7 @@ function buildKellyEVPanel(bet, matchLabel, matchData, siblingRank){
     <div style="display:flex;gap:6px;margin-bottom:6px;">
       <input type="number"
         id="${safeId}"
-        value="${kelly.suggestedAmount.toFixed(2)}"
+        value="${adjustedAmount.toFixed(2)}"
         min="${bk.minBetAmount}"
         max="${bk.maxBetAmount}"
         step="0.5"
@@ -1908,12 +1955,12 @@ function buildKellyEVPanel(bet, matchLabel, matchData, siblingRank){
         data-market="${bet.market.replace(/"/g,'&quot;')}"
         data-odds="${bet.odds}"
         data-confidence="${bet.confidence}"
-        data-default="${kelly.suggestedAmount.toFixed(2)}"
+        data-default="${adjustedAmount.toFixed(2)}"
         data-fixture-id="${matchData?.fixtureId||''}"
         data-league="${matchData?.league||''}"
         onclick="handleBetClick(this)"
         style="flex:1;font-size:12px;font-weight:600;background:#1a1a1a;color:#fff;border:none;border-radius:6px;padding:6px 10px;cursor:pointer;">
-        💰 Apostar <span class="bet-btn-label">${kelly.suggestedAmount.toFixed(2)}</span>
+        💰 Apostar <span class="bet-btn-label">${adjustedAmount.toFixed(2)}</span>
       </button>
     </div>
     <div style="display:flex;gap:6px;">
@@ -3630,7 +3677,39 @@ function getMarketCalibrationAdj(marketName) {
 // cuando la jugada sugerida cae en una combinacion mercado+banda con mal
 // historial real. Incluye una etiqueta de confiabilidad segun tamano de
 // muestra, para no sobre-alarmar con señales basadas en pocas jugadas.
+// Cruce mercado x banda de confianza -- version mas precisa que combinar
+// señales por separado (mercado en general + banda en general). Un mercado
+// puede fallar solo en ciertas bandas de confianza mientras otros mercados
+// en esa misma banda estan bien, lo cual diluye el promedio general de la
+// banda y esconde el problema real. Esto mira la INTERSECCION exacta.
+function getMarketBandCalibration(market, confidence) {
+  const bandDefs = [{min:50,max:60},{min:60,max:70},{min:70,max:80},{min:80,max:90},{min:90,max:100}];
+  const bandDef = bandDefs.find(function(b){ return confidence >= b.min && confidence < b.max; });
+  if (!bandDef) return null;
+  const h = getHistory().filter(function(b){ return b.result !== 'pending'; });
+  const targetCat = getMarketCategory(market);
+  const inCombo = h.filter(function(b){
+    return getMarketCategory(b.market) === targetCat && (b.confidence||70) >= bandDef.min && (b.confidence||70) < bandDef.max;
+  });
+  if (inCombo.length < 6) return null;
+  const realRate = inCombo.filter(function(b){ return b.result === 'win'; }).length / inCombo.length;
+  const avgConf = inCombo.reduce(function(s,b){ return s+(b.confidence||70); }, 0) / inCombo.length / 100;
+  return { gap: Math.round((realRate-avgConf)*100), n: inCombo.length, realPct: Math.round(realRate*100), predPct: Math.round(avgConf*100) };
+}
+
 function getBetCalibrationWarning(bet) {
+  // Señal principal: la interseccion exacta mercado+banda, mas sensible
+  // (gap<=-15) porque es una señal mas precisa que las marginales por separado.
+  const intersection = getMarketBandCalibration(bet.market, bet.confidence);
+  if (intersection && intersection.gap <= -15) {
+    return {
+      gap: intersection.gap,
+      n: intersection.n,
+      reliability: intersection.n >= 20 ? 'alta' : intersection.n >= 12 ? 'media' : 'baja',
+    };
+  }
+  // Fallback: señal cruzada de nivel general, para cuando la interseccion
+  // exacta todavia no tiene muestra suficiente (n<6).
   const marketAdj = getMarketCalibrationAdj(bet.market);
   const bandData = getCalibrationPlotData().find(function(d){ return bet.confidence >= d.min && bet.confidence < d.max; });
   if (!bandData || bandData.n < 8 || bandData.real == null) return null;
@@ -3655,7 +3734,12 @@ function getBetCalibrationWarning(bet) {
 function shouldBlockBet(bet) {
   const warning = getBetCalibrationWarning(bet);
   if (!warning) return false;
-  return bet.confidence >= 80 && Math.abs(warning.gap) >= 40 && warning.reliability !== 'baja';
+  // MEJORA: antes solo bloqueaba si confidence>=80, lo cual dejaba pasar el
+  // mismo patron severo detectado en bandas mas bajas (ej. corners en 60-70%)
+  // solo por la banda en la que caia, sin relacion con que tan grave era la
+  // señal real. Ahora bloquea por severidad+confiabilidad de la señal,
+  // sin importar en que banda de confianza este la jugada.
+  return Math.abs(warning.gap) >= 35 && warning.reliability === 'alta';
 }
 
 // ── NIVEL 3: Calibracion por liga ────────────────────────────────────────────
