@@ -548,11 +548,16 @@ async function restoreHistoryFromCloud() {
     const local = getHistory();
     const localKeys = new Set(local.map(function(b){ return (b.match||'') + '|' + (b.market||'') + '|' + (b.date||'').slice(0,10); }));
     let restored = 0;
-    cloudBets.forEach(function(cb) {
+    cloudBets.forEach(function(cb, i) {
       const key = (cb.match||'') + '|' + (cb.market||'') + '|' + (cb.created_at||'').slice(0,10);
       if (localKeys.has(key)) return; // ya existe localmente, no duplicar
+      // BUGFIX: antes se usaba id:'cloud_'+cb.id (string) -- los botones de
+      // liquidar insertan el id SIN comillas dentro del onclick
+      // (settleFromHistory(${b.id},true)), asi que un id de texto generaba
+      // JavaScript invalido y el boton no hacia nada al tocarlo. Ahora se usa
+      // un id numerico, igual que el resto del sistema.
       local.push({
-        id: 'cloud_' + cb.id,
+        id: Date.now() + i,
         date: cb.created_at,
         match: cb.match,
         market: cb.market,
@@ -630,7 +635,25 @@ function showConfirm(msg, onOk) {
 
 // ── HISTORIAL DE APUESTAS ──────────────────────────────
 const HISTORY_KEY = 'betting_tool_history_v1';
-function getHistory(){ try{ return JSON.parse(localStorage.getItem(HISTORY_KEY)||'[]'); }catch(e){return[];} }
+// MEJORA: migracion automatica -- si alguna restauracion anterior dejo
+// entradas con id de texto ('cloud_'+uuid), los botones de liquidar quedaban
+// rotos (ver fix en restoreHistoryFromCloud). Esto detecta y corrige esas
+// entradas la primera vez que se lee el historial, sin necesidad de volver
+// a restaurar manualmente.
+function getHistory(){
+  try{
+    const h = JSON.parse(localStorage.getItem(HISTORY_KEY)||'[]');
+    let needsFix = false;
+    h.forEach(function(b, i){
+      if (typeof b.id !== 'number' || isNaN(b.id)) {
+        b.id = Date.now() + i;
+        needsFix = true;
+      }
+    });
+    if (needsFix) { try { localStorage.setItem(HISTORY_KEY, JSON.stringify(h.slice(-5000))); } catch(e){} }
+    return h;
+  } catch(e) { return []; }
+}
 // BUGFIX: antes se recortaba a los ultimos 200 registros en CADA guardado,
 // borrando permanentemente cualquier apuesta mas antigua (incluidas ganadas)
 // una vez que el volumen total superaba 200. Con 30-40+ apuestas/dia esto se
