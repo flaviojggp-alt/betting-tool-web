@@ -334,6 +334,56 @@ function getLeagueLabel(key) {
   return found ? found.label : key;
 }
 
+function getUnidentifiedMatches() {
+  const h = getHistory().filter(function(b){ return !b.league; });
+  const byMatch = {};
+  h.forEach(function(b) {
+    if (!byMatch[b.match]) byMatch[b.match] = { match: b.match, count: 0 };
+    byMatch[b.match].count++;
+  });
+  return Object.values(byMatch).sort(function(a,b){ return b.count - a.count; });
+}
+
+function assignLeagueToMatch(matchName, leagueKey) {
+  if (!leagueKey) return;
+  const h = getHistory();
+  let updated = 0;
+  h.forEach(function(b) {
+    if (b.match === matchName && !b.league) { b.league = leagueKey; updated++; }
+  });
+  saveHistory(h);
+  return updated;
+}
+
+function jsSingleQuoteEscape(s) {
+  return "'" + String(s).replace(/\\/g, '\\\\').replace(/'/g, "\\'") + "'";
+}
+
+function showLeagueIdentifier() {
+  const unidentified = getUnidentifiedMatches();
+  if (!unidentified.length) { showToast('No hay apuestas sin liga identificada', 'info'); return; }
+  const overlay = document.createElement('div');
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:100000;display:flex;align-items:flex-start;justify-content:center;overflow-y:auto;padding:20px 0;';
+  const leagueOptions = '<option value="">-- Elegir liga --</option>' + LEAGUES.map(function(l){ return '<option value="' + l.key + '">' + l.label + '</option>'; }).join('');
+  overlay.innerHTML = '<div style="background:#fff;border-radius:14px;padding:1.25rem;max-width:460px;width:92%;box-shadow:0 8px 32px rgba(0,0,0,.18);">'
+    + '<p style="font-size:14px;font-weight:600;margin-bottom:4px;">Identificar liga por partido</p>'
+    + '<p style="font-size:11px;color:#999;margin-bottom:12px;">' + unidentified.length + ' partido(s) unico(s) sin liga. Se aplica a todas las apuestas de ese mismo partido.</p>'
+    + '<div id="league-id-list" style="max-height:400px;overflow-y:auto;">'
+    + unidentified.map(function(m, i) {
+        const rowId = 'lid-row-' + i;
+        return '<div id="' + rowId + '" style="display:flex;align-items:center;gap:6px;padding:6px 0;border-bottom:1px solid #f5f5f0;">'
+          + '<div style="flex:1;font-size:12px;">' + m.match.replace(/</g,'&lt;') + ' <span style="color:#999;">(' + m.count + ')</span></div>'
+          + '<select id="' + rowId + '-select" style="font-size:11px;padding:4px;border-radius:5px;border:1px solid #ddd;max-width:130px;">' + leagueOptions + '</select>'
+          + '<button onclick="const v=document.getElementById(\'' + rowId + '-select\').value;if(v){assignLeagueToMatch(' + jsSingleQuoteEscape(m.match) + ',v);document.getElementById(\'' + rowId + '\').remove();showToast(\'Liga asignada\',\'success\',1500);}" style="font-size:11px;background:#1a1a1a;color:#fff;border:none;border-radius:5px;padding:4px 8px;cursor:pointer;">✓</button>'
+          + '</div>';
+      }).join('')
+    + '</div>'
+    + '<button id="league-id-close" style="width:100%;margin-top:12px;background:#f5f5f0;border:1px solid #ddd;border-radius:8px;padding:8px;font-size:13px;cursor:pointer;">Cerrar</button>'
+    + '</div>';
+  document.body.appendChild(overlay);
+  overlay.querySelector('#league-id-close').onclick = function(){ overlay.remove(); renderHistory(); };
+}
+
 function switchTab(t) {
   ['config','select','matches','results','history','bankroll','pro','today'].forEach(function(id) {
     document.getElementById('tab-'+id).style.display = t===id?'block':'none';
@@ -1142,6 +1192,63 @@ function getRemainingBetsToday(bk){
   return Math.max(0, bk.maxBetsPerDay - getBetsToday(bk).length);
 }
 
+// ── APUESTA MANUAL ───────────────────────────────────────────────────────────
+// Antes existia recordBetFromUI() pero sin ningun boton conectado en la UI --
+// un "factor fantasma" mas. Esta es la version completa y real: usa
+// placeBet() (el mismo flujo que las jugadas sugeridas por el analizador),
+// asi que descuenta de la banca real y queda disponible para liquidar,
+// verificar CLV, etc. -- no solo un registro cosmetico en Historial.
+function showManualBetModal() {
+  // Evita IDs duplicados en el DOM si el boton se toca mas de una vez sin
+  // cerrar el modal anterior -- getElementById solo encontraria el primero,
+  // leyendo datos del modal viejo en vez del nuevo.
+  const existing = document.getElementById('manual-bet-overlay');
+  if (existing) existing.remove();
+
+  const bk = getBK();
+  const leagueOptions = '<option value="">-- Opcional --</option>' + LEAGUES.map(function(l){ return '<option value="' + l.key + '">' + l.label + '</option>'; }).join('');
+  const overlay = document.createElement('div');
+  overlay.id = 'manual-bet-overlay';
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:100000;display:flex;align-items:center;justify-content:center;padding:20px 0;overflow-y:auto;';
+  overlay.innerHTML = '<div style="background:#fff;border-radius:14px;padding:1.25rem;max-width:360px;width:92%;box-shadow:0 8px 32px rgba(0,0,0,.18);">'
+    + '<p style="font-size:14px;font-weight:600;margin-bottom:12px;">Apuesta manual</p>'
+    + '<label style="font-size:11px;color:#999;">Partido</label>'
+    + '<input type="text" id="mb-match" placeholder="Equipo A vs Equipo B" style="width:100%;padding:8px;border:1px solid #ddd;border-radius:6px;margin-bottom:8px;font-size:13px;box-sizing:border-box;">'
+    + '<label style="font-size:11px;color:#999;">Mercado</label>'
+    + '<input type="text" id="mb-market" placeholder="ej. Victoria Equipo A" style="width:100%;padding:8px;border:1px solid #ddd;border-radius:6px;margin-bottom:8px;font-size:13px;box-sizing:border-box;">'
+    + '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px;">'
+    + '<div><label style="font-size:11px;color:#999;">Cuota</label><input type="number" id="mb-odds" step="0.01" placeholder="1.85" style="width:100%;padding:8px;border:1px solid #ddd;border-radius:6px;font-size:13px;box-sizing:border-box;"></div>'
+    + '<div><label style="font-size:11px;color:#999;">Confianza %</label><input type="number" id="mb-confidence" value="60" style="width:100%;padding:8px;border:1px solid #ddd;border-radius:6px;font-size:13px;box-sizing:border-box;"></div>'
+    + '</div>'
+    + '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px;">'
+    + '<div><label style="font-size:11px;color:#999;">Monto (' + bk.currency + ')</label><input type="number" id="mb-amount" step="0.5" value="' + bk.minBetAmount + '" style="width:100%;padding:8px;border:1px solid #ddd;border-radius:6px;font-size:13px;box-sizing:border-box;"></div>'
+    + '<div><label style="font-size:11px;color:#999;">Liga (opcional)</label><select id="mb-league" style="width:100%;padding:8px;border:1px solid #ddd;border-radius:6px;font-size:13px;box-sizing:border-box;">' + leagueOptions + '</select></div>'
+    + '</div>'
+    + '<p style="font-size:10px;color:#999;margin-bottom:10px;">Se descuenta de tu banca real y queda igual que las jugadas del analizador (Historial, calibracion, etc.). No se puede verificar el resultado automaticamente (no hay partido identificado) -- liquidala manualmente en Banca cuando termine.</p>'
+    + '<div style="display:flex;gap:8px;">'
+    + '<button id="mb-cancel" style="flex:1;background:#f5f5f0;border:1px solid #ddd;border-radius:8px;padding:9px;font-size:13px;cursor:pointer;">Cancelar</button>'
+    + '<button id="mb-save" style="flex:1;background:#1a1a1a;color:#fff;border:none;border-radius:8px;padding:9px;font-size:13px;cursor:pointer;">Guardar</button>'
+    + '</div></div>';
+  document.body.appendChild(overlay);
+  overlay.querySelector('#mb-cancel').onclick = function(){ overlay.remove(); };
+  overlay.querySelector('#mb-save').onclick = function(){
+    const match = document.getElementById('mb-match').value.trim();
+    const market = document.getElementById('mb-market').value.trim();
+    const odds = parseFloat(document.getElementById('mb-odds').value);
+    const confidence = Math.min(99, Math.max(1, parseInt(document.getElementById('mb-confidence').value) || 60));
+    const amount = parseFloat(document.getElementById('mb-amount').value);
+    const league = document.getElementById('mb-league').value || null;
+    if (!match || !market) { showToast('Completa partido y mercado', 'warning'); return; }
+    if (!odds || odds <= 1) { showToast('Cuota invalida (debe ser mayor a 1)', 'warning'); return; }
+    if (!amount || amount <= 0) { showToast('Monto invalido', 'warning'); return; }
+    const res = placeBet(match, market, odds, confidence, amount, null, league);
+    if (!res.ok) { showToast(res.error, 'warning'); return; }
+    showToast('Apuesta manual registrada', 'success');
+    overlay.remove();
+    renderBankroll();
+  };
+}
+
 function placeBet(match, market, odds, confidence, amount, fixtureId, league){
   const bk = getBK();
 
@@ -1685,7 +1792,8 @@ function renderBankroll(){
       </div>
 
       <!-- Verificacion automatica de resultados pendientes (todas, no solo hoy) -->
-      <button onclick="checkPendingBets()" class="btn-sec" style="width:100%;margin-bottom:14px;font-size:13px;padding:10px;">🔎 Verificar resultados pendientes</button>
+      <button onclick="checkPendingBets()" class="btn-sec" style="width:100%;margin-bottom:8px;font-size:13px;padding:10px;">🔎 Verificar resultados pendientes</button>
+      <button onclick="showManualBetModal()" class="btn-sec" style="width:100%;margin-bottom:14px;font-size:13px;padding:10px;">✏️ Apuesta manual</button>
 
       <!-- TODAS las pendientes (no solo hoy) -- BUGFIX: antes solo se veian y
            podian liquidarse las de HOY. Las de dias anteriores quedaban
@@ -1862,6 +1970,7 @@ function renderHistory(){
   const stats = getStats(filteredHistory);
   const mr = document.getElementById('history-stats');
   const filterBar = `<button onclick="restoreHistoryFromCloud()" style="width:100%;margin-bottom:8px;font-size:12px;padding:8px;border-radius:6px;cursor:pointer;border:1px solid #185FA5;background:#E6F1FB;color:#185FA5;">☁️ Restaurar historial completo desde la nube</button>
+  <button onclick="showLeagueIdentifier()" style="width:100%;margin-bottom:8px;font-size:12px;padding:8px;border-radius:6px;cursor:pointer;border:1px solid #854F0B;background:#FFF5E6;color:#854F0B;">🏷️ Identificar liga de apuestas sin clasificar</button>
   <div style="display:flex;gap:6px;margin-bottom:12px;">
     ${[[7,'7 dias'],[30,'30 dias'],[null,'Todo']].map(([days,label])=>`
       <button onclick="window._historyDaysFilter=${days};renderHistory();" style="flex:1;font-size:12px;padding:7px;border-radius:6px;cursor:pointer;border:1px solid ${window._historyDaysFilter===days?'#1a1a1a':'#ddd'};background:${window._historyDaysFilter===days?'#1a1a1a':'#fff'};color:${window._historyDaysFilter===days?'#fff':'#555'};">${label}</button>
@@ -3340,7 +3449,7 @@ function calcBets(m){
   const aCornersExp = aCornersAgainst !== null
     ? (aCornersSafe + aCornersAgainst) / 2   // visitante: promedia corners generados vs concedidos por rival
     : aCornersSafe;
-  const totalCornersRaw = hCornersExp + aCornersExp + weatherCornersAdj;
+  const totalCornersRaw = hCornersExp + aCornersExp + weatherCornersAdj + hPressingCornersAdj + aPressingCornersAdj;
   // MEJORA: rango realista de corners totales es aprox. 2-16.
   const totalCorners = Math.max(2, Math.min(16, totalCornersRaw));
   if (totalCorners >= 7.0) {
@@ -3491,7 +3600,7 @@ function calcBets(m){
         reason:`Visitante domina: xG +${Math.abs(hXGdom).toFixed(2)}, ranking +${Math.abs(rankDiff)} pos${luckNote}`});
     }
   }
-  if(predWH&&(!h2h||h2h.homeWinRate<0.6)&&m.odds.h<=2.20) bets.push({market:`Victoria ${m.home.name}`,odds:m.odds.h,confidence:Math.min(78,Math.max(40,60+pB+necVictAdj+eloVictAdj)),factors:'Pred'+necTag+tramiteTag+eloTag,reason:`API predice local (${pred.percent?.home||''})${necNote}${eloNote}`});
+  if(predWH&&(!h2h||h2h.homeWinRate<0.6)&&m.odds.h<=2.20) bets.push({market:`Victoria ${m.home.name}`,odds:m.odds.h,confidence:Math.min(78,Math.max(40,60+pB+necVictAdj+eloVictAdj+rivalQualityAdj)),factors:'Pred'+necTag+tramiteTag+eloTag,reason:`API predice local (${pred.percent?.home||''})${necNote}${eloNote}`});
 
   // ── DETECCION AUTOMATICA DE VALUE BETS ──────────────────────────────────
   // Compara probabilidad del modelo vs probabilidad implicita del mercado
@@ -3847,13 +3956,22 @@ function getBetCalibrationWarning(bet) {
 // adapta solo si el patron mejora o aparece en otro mercado.
 function shouldBlockBet(bet) {
   const warning = getBetCalibrationWarning(bet);
-  if (!warning) return false;
   // MEJORA: antes solo bloqueaba si confidence>=80, lo cual dejaba pasar el
   // mismo patron severo detectado en bandas mas bajas (ej. corners en 60-70%)
   // solo por la banda en la que caia, sin relacion con que tan grave era la
   // señal real. Ahora bloquea por severidad+confiabilidad de la señal,
   // sin importar en que banda de confianza este la jugada.
-  return Math.abs(warning.gap) >= 35 && warning.reliability === 'alta';
+  const patternBlock = warning && Math.abs(warning.gap) >= 35 && warning.reliability === 'alta';
+
+  // Bloqueo de mercado completo: si el mercado en general esta severamente
+  // penalizado con muestra ya confiable, bloquear el mercado COMPLETO -- no
+  // solo en la banda alta. Corners confirmado como problema sistemico.
+  const h = getHistory().filter(function(b){ return b.result !== 'pending'; });
+  const targetCat = getMarketCategory(bet.market);
+  const inCat = h.filter(function(b){ return getMarketCategory(b.market) === targetCat; });
+  const marketWideBlock = inCat.length >= 30 && getMarketCalibrationAdj(bet.market) <= -12;
+
+  return patternBlock || marketWideBlock;
 }
 
 // ── NIVEL 3: Calibracion por liga ────────────────────────────────────────────
