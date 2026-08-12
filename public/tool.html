@@ -1155,29 +1155,30 @@ function evaluateMarketResult(marketText, r) {
 // resultado real via el proxy, y muestra un panel con la sugerencia de cada
 // una para que el usuario confirme con un tap. No liquida nada por si sola.
 async function checkPendingBets() {
-  const bk = getBK();
-  const allPending = (bk.transactions || []).filter(function(t){ return t.status === 'pending'; });
-  const pending = allPending.filter(function(t){ return t.fixtureId; });
-  if (!pending.length) {
-    const withoutFixtureId = allPending.length;
-    showToast(
-      withoutFixtureId > 0
-        ? withoutFixtureId + ' apuesta(s) pendiente(s), pero ninguna tiene partido identificado (se registraron antes de esta funcion, o el fixtureId no se guardo) -- liquidalas manualmente en Banca.'
-        : 'No hay apuestas pendientes.',
-      'info', 5000
-    );
-    return;
-  }
+  try {
+    const bk = getBK();
+    const allPending = (bk.transactions || []).filter(function(t){ return t.status === 'pending'; });
+    const pending = allPending.filter(function(t){ return t.fixtureId; });
+    if (!pending.length) {
+      const withoutFixtureId = allPending.length;
+      showToast(
+        withoutFixtureId > 0
+          ? withoutFixtureId + ' apuesta(s) pendiente(s), pero ninguna tiene partido identificado (se registraron antes de esta funcion, o el fixtureId no se guardo) -- liquidalas manualmente en Banca.'
+          : 'No hay apuestas pendientes.',
+        'info', 5000
+      );
+      return;
+    }
 
-  showToast('Verificando ' + pending.length + ' apuesta(s) pendiente(s)...', 'info', 2500);
+    showToast('Verificando ' + pending.length + ' apuesta(s) pendiente(s)...', 'info', 2500);
 
-  const uniqueFixtures = Array.from(new Set(pending.map(function(t){ return t.fixtureId; })));
-  const results = {};
-  for (const fid of uniqueFixtures) {
-    try {
-      const r = await fetch(PROXY() + '/fixtures/result?fixtureId=' + fid).then(function(res){ return res.json(); });
-      if (r.found) results[fid] = r;
-    } catch(e) { /* seguir con las demas */ }
+    const uniqueFixtures = Array.from(new Set(pending.map(function(t){ return t.fixtureId; })));
+    const results = {};
+    for (const fid of uniqueFixtures) {
+      try {
+        const r = await fetch(PROXY() + '/fixtures/result?fixtureId=' + fid).then(function(res){ return res.json(); });
+        if (r.found) results[fid] = r;
+      } catch(e) { /* seguir con las demas */ }
   }
 
   const suggestions = pending.map(function(t) {
@@ -1231,6 +1232,14 @@ async function checkPendingBets() {
   overlay.id = 'verify-overlay';
   document.body.appendChild(overlay);
   overlay.querySelector('#verify-close').onclick = function(){ overlay.remove(); };
+  } catch (e) {
+    // BUGFIX: si algo fallaba en cualquier punto de la funcion (proxy caido,
+    // dato inesperado, etc.), antes no aparecia NADA -- ni ventana, ni error,
+    // ni toast. Silencio total, imposible diagnosticar. Ahora el error real
+    // se muestra para poder identificar la causa exacta.
+    showToast('Error al verificar resultados: ' + e.message, 'error', 6000);
+    console.error('checkPendingBets error:', e);
+  }
 }
 
 // Confirma una sugerencia individual del panel de "Verificar resultados
