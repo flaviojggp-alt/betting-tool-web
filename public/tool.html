@@ -524,6 +524,55 @@ async function syncAllToCloud() {
   await syncAllBankrollTxToCloud();
 }
 
+// ── RESTAURAR HISTORIAL DESDE LA NUBE ───────────────────────────────────────
+// El historial local (localStorage) tuvo un bug que recortaba a los ultimos
+// 200 registros en cada guardado, borrando apuestas viejas permanentemente.
+// Supabase NO tiene ese limite (cada apuesta se sube individualmente, sin
+// recorte), asi que la nube probablemente tiene mas historial real que el
+// local. Esta funcion trae todo lo que hay en Supabase y lo mezcla con lo
+// local, sin duplicar lo que ya existe (empareja por partido+mercado+fecha,
+// el mismo criterio que usa el guardado a la nube).
+async function restoreHistoryFromCloud() {
+  if (!_sb || !_sbUser) { showToast('Conecta la nube primero', 'warning'); return; }
+  try {
+    const { data: sessionData } = await _sb.auth.getSession();
+    const token = sessionData?.session?.access_token;
+    if (!token) { showToast('Sesion de nube expirada, reconecta', 'warning'); return; }
+    const res = await fetch(SUPABASE_URL + '/rest/v1/bets?user_id=eq.' + _sbUser.id + '&order=created_at.asc', {
+      headers: { 'apikey': SUPABASE_KEY, 'Authorization': 'Bearer ' + token },
+    });
+    if (!res.ok) { showToast('Error al leer la nube: ' + res.status, 'error'); return; }
+    const cloudBets = await res.json();
+    if (!cloudBets.length) { showToast('No hay apuestas en la nube', 'info'); return; }
+
+    const local = getHistory();
+    const localKeys = new Set(local.map(function(b){ return (b.match||'') + '|' + (b.market||'') + '|' + (b.date||'').slice(0,10); }));
+    let restored = 0;
+    cloudBets.forEach(function(cb) {
+      const key = (cb.match||'') + '|' + (cb.market||'') + '|' + (cb.created_at||'').slice(0,10);
+      if (localKeys.has(key)) return; // ya existe localmente, no duplicar
+      local.push({
+        id: 'cloud_' + cb.id,
+        date: cb.created_at,
+        match: cb.match,
+        market: cb.market,
+        odds: cb.odds,
+        confidence: cb.confidence,
+        amount: cb.amount,
+        result: cb.result,
+        league: null, // Supabase no guardaba este campo todavia en esas fechas
+      });
+      localKeys.add(key);
+      restored++;
+    });
+    saveHistory(local);
+    showToast(restored > 0 ? 'Restauradas ' + restored + ' apuesta(s) desde la nube' : 'Todo lo de la nube ya estaba local', 'success', 5000);
+    renderHistory();
+  } catch(e) {
+    showToast('Error al restaurar desde la nube: ' + e.message, 'error', 6000);
+  }
+}
+
 
 // ── NOTIFICATIONS ─────────────────────────────────────────────────────────
 function showToast(msg, type, ms) {
@@ -582,7 +631,12 @@ function showConfirm(msg, onOk) {
 // ── HISTORIAL DE APUESTAS ──────────────────────────────
 const HISTORY_KEY = 'betting_tool_history_v1';
 function getHistory(){ try{ return JSON.parse(localStorage.getItem(HISTORY_KEY)||'[]'); }catch(e){return[];} }
-function saveHistory(h){ try{ localStorage.setItem(HISTORY_KEY, JSON.stringify(h.slice(-200))); }catch(e){} }
+// BUGFIX: antes se recortaba a los ultimos 200 registros en CADA guardado,
+// borrando permanentemente cualquier apuesta mas antigua (incluidas ganadas)
+// una vez que el volumen total superaba 200. Con 30-40+ apuestas/dia esto se
+// alcanzaba en pocos dias, distorsionando el ROI y las estadisticas al perder
+// datos reales, no por ningun problema del modelo. Subido a 5000.
+function saveHistory(h){ try{ localStorage.setItem(HISTORY_KEY, JSON.stringify(h.slice(-5000))); }catch(e){} }
 function recordBet(bet, sharedId){
   const h = getHistory();
   const entry = { id: sharedId||Date.now(), date: new Date().toISOString(), match: bet.match, market: bet.market, odds: bet.odds, confidence: bet.confidence, amount: bet.amount||0, result: 'pending', league: bet.league||null };
@@ -1784,7 +1838,8 @@ function renderHistory(){
   const filteredHistory = getFilteredHistory(window._historyDaysFilter);
   const stats = getStats(filteredHistory);
   const mr = document.getElementById('history-stats');
-  const filterBar = `<div style="display:flex;gap:6px;margin-bottom:12px;">
+  const filterBar = `<button onclick="restoreHistoryFromCloud()" style="width:100%;margin-bottom:8px;font-size:12px;padding:8px;border-radius:6px;cursor:pointer;border:1px solid #185FA5;background:#E6F1FB;color:#185FA5;">☁️ Restaurar historial completo desde la nube</button>
+  <div style="display:flex;gap:6px;margin-bottom:12px;">
     ${[[7,'7 dias'],[30,'30 dias'],[null,'Todo']].map(([days,label])=>`
       <button onclick="window._historyDaysFilter=${days};renderHistory();" style="flex:1;font-size:12px;padding:7px;border-radius:6px;cursor:pointer;border:1px solid ${window._historyDaysFilter===days?'#1a1a1a':'#ddd'};background:${window._historyDaysFilter===days?'#1a1a1a':'#fff'};color:${window._historyDaysFilter===days?'#fff':'#555'};">${label}</button>
     `).join('')}
@@ -4750,7 +4805,9 @@ function recordClosingLine(betId, openOdds, closingOdds) {
   try { records = JSON.parse(localStorage.getItem(CLV_KEY) || '[]'); } catch(e) {}
   const clvPct = ((openOdds - closingOdds) / closingOdds) * 100; // positivo = tomaste mejor precio
   records.push({ betId: betId, openOdds: openOdds, closingOdds: closingOdds, clvPct: clvPct, date: new Date().toISOString() });
-  try { localStorage.setItem(CLV_KEY, JSON.stringify(records.slice(-200))); } catch(e) {}
+  // BUGFIX: mismo problema que en saveHistory -- recortaba a 200 y borraba
+  // registros de CLV viejos permanentemente. Subido a 5000.
+  try { localStorage.setItem(CLV_KEY, JSON.stringify(records.slice(-5000))); } catch(e) {}
 }
 
 function getCLVStats() {
