@@ -1156,8 +1156,18 @@ function evaluateMarketResult(marketText, r) {
 // una para que el usuario confirme con un tap. No liquida nada por si sola.
 async function checkPendingBets() {
   const bk = getBK();
-  const pending = (bk.transactions || []).filter(function(t){ return t.status === 'pending' && t.fixtureId; });
-  if (!pending.length) { showToast('No hay apuestas pendientes con partido identificado', 'info'); return; }
+  const allPending = (bk.transactions || []).filter(function(t){ return t.status === 'pending'; });
+  const pending = allPending.filter(function(t){ return t.fixtureId; });
+  if (!pending.length) {
+    const withoutFixtureId = allPending.length;
+    showToast(
+      withoutFixtureId > 0
+        ? withoutFixtureId + ' apuesta(s) pendiente(s), pero ninguna tiene partido identificado (se registraron antes de esta funcion, o el fixtureId no se guardo) -- liquidalas manualmente en Banca.'
+        : 'No hay apuestas pendientes.',
+      'info', 5000
+    );
+    return;
+  }
 
   showToast('Verificando ' + pending.length + ' apuesta(s) pendiente(s)...', 'info', 2500);
 
@@ -1198,7 +1208,24 @@ async function checkPendingBets() {
           + '<span style="font-size:12px;font-weight:700;color:' + colorTx + ';">Sugerido: ' + (s.won?'✓ Gano':'✗ Perdio') + '</span>'
           + '<button onclick="confirmVerifiedBet(' + s.tx.id + ',' + s.won + ',\'' + itemId + '\')" style="font-size:11px;background:#1a1a1a;color:#fff;border:none;border-radius:6px;padding:5px 12px;cursor:pointer;">Confirmar</button>'
           + '</div></div>';
-      }).join('') : '<p style="font-size:12px;color:#999;">Ninguna apuesta pendiente tiene un partido ya finalizado todavia.</p>')
+      }).join('') : '')
+    // BUGFIX: las apuestas de mercados no evaluables automaticamente (corners,
+    // tarjetas -- la mayoria de las apuestas reales) antes desaparecian por
+    // completo de esta lista, solo se contaban en el numero de arriba. El
+    // partido SI habia terminado, pero el mensaje decia "ningun partido ha
+    // terminado todavia", lo cual era enganoso. Ahora se muestran tambien,
+    // con botones para liquidar manualmente ya que no hay sugerencia automatica.
+    + (suggestions.filter(function(s){ return s.status === 'not_evaluable'; }).map(function(s) {
+        const itemId = 'verify-item-' + s.tx.id;
+        return '<div id="' + itemId + '" style="background:#f5f5f0;border-radius:8px;padding:8px 10px;margin-bottom:8px;">'
+          + '<div style="font-size:12px;font-weight:600;">' + s.tx.match + '</div>'
+          + '<div style="font-size:11px;color:#555;margin-bottom:4px;">' + s.tx.market + ' · partido finalizado, mercado no evaluable automaticamente</div>'
+          + '<div style="display:flex;justify-content:flex-end;gap:6px;">'
+          + '<button onclick="confirmVerifiedBet(' + s.tx.id + ',true,\'' + itemId + '\')" style="font-size:11px;background:#EAF3DE;color:#3B6D11;border:none;border-radius:5px;padding:4px 10px;cursor:pointer;">✓ Ganó</button>'
+          + '<button onclick="confirmVerifiedBet(' + s.tx.id + ',false,\'' + itemId + '\')" style="font-size:11px;background:#FCEBEB;color:#A32D2D;border:none;border-radius:5px;padding:4px 10px;cursor:pointer;">✗ Perdió</button>'
+          + '</div></div>';
+      }).join(''))
+    + ((!evaluable.length && notEvaluable === 0) ? '<p style="font-size:12px;color:#999;">Ninguna apuesta pendiente tiene un partido ya finalizado todavia.</p>' : '')
     + '<button id="verify-close" style="width:100%;margin-top:6px;background:#f5f5f0;border:1px solid #ddd;border-radius:8px;padding:8px;font-size:13px;cursor:pointer;">Cerrar</button>'
     + '</div>';
   overlay.id = 'verify-overlay';
