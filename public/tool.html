@@ -4226,6 +4226,22 @@ function generateCombos(matchData){
       console.error('calcBets fallo para ' + m.home.name + ' vs ' + m.away.name + ':', e);
       showToast('Error analizando ' + m.home.name + ' vs ' + m.away.name + ': ' + e.message, 'error', 6000);
     }
+    // DIAGNOSTICO: si no hubo excepcion pero tampoco se genero NINGUNA
+    // jugada (ni siquiera de baja confianza), lo mas probable es que los
+    // datos base del partido (stats, h2h, cuotas, etc.) no cargaron bien
+    // ANTES de llegar al analisis -- esto lo hace visible en vez de dejar
+    // "0 partidos" como unica pista.
+    if (bets.length === 0) {
+      m.dataDiagnostic = {
+        oddsFilled: !!(m.odds && m.odds.h && m.odds.a),
+        statsHomeN: m.stats?.home?.global?.sampleSize || m.stats?.home?.sampleSize || 0,
+        statsAwayN: m.stats?.away?.global?.sampleSize || m.stats?.away?.sampleSize || 0,
+        h2hFound: !!(m.h2hStats && m.h2hStats.sampleSize > 0),
+        predictionFound: !!m.prediction?.found,
+        oddsCompFound: !!m.oddsComparison?.found,
+        injuriesLoaded: m.injuries != null,
+      };
+    }
     return { label: `${m.home.name} vs ${m.away.name}`, bets: bets, match: m };
   });
 
@@ -4370,7 +4386,8 @@ function generateCombos(matchData){
     if (top5.length >= 5) break;
   }
 
-  return { bestPerMatch, combos: scoredCombos, top5 };
+  const zeroBetMatches = matchData.filter(function(m){ return m.dataDiagnostic; });
+  return { bestPerMatch, combos: scoredCombos, top5, zeroBetMatches };
 }
 
 function renderResults(data){
@@ -4418,6 +4435,24 @@ function renderResults(data){
         Prueba bajar el slider de confianza mínima, o selecciona partidos de equipos con más datos disponibles.
       </span>
     </div>`;
+    // Si algun partido no genero NINGUNA jugada (ni de baja confianza), mostrar
+    // el diagnostico de que datos llegaron y cuales no, para ver la causa real
+    // en vez de adivinar.
+    const zeroMatches = data.zeroBetMatches || [];
+    if (zeroMatches.length) {
+      zeroMatches.forEach(function(m) {
+        const d = m.dataDiagnostic;
+        cc.innerHTML += `<div style="background:#f5f5f0;border-radius:8px;padding:10px 12px;margin-bottom:8px;font-size:11px;">
+          <div style="font-weight:600;margin-bottom:4px;">🔍 ${m.home.name} vs ${m.away.name}: cero jugadas generadas -- diagnostico de datos</div>
+          <div style="color:#999;">
+            Cuotas ingresadas: ${d.oddsFilled?'✓':'✗ faltan'} ·
+            Stats local (n=${d.statsHomeN}) · Stats visitante (n=${d.statsAwayN}) ·
+            H2H: ${d.h2hFound?'✓':'✗'} · Predicción API: ${d.predictionFound?'✓':'✗'} ·
+            Comparación cuotas: ${d.oddsCompFound?'✓':'✗'} · Lesiones: ${d.injuriesLoaded?'✓':'✗'}
+          </div>
+        </div>`;
+      });
+    }
     // Mostrar jugadas de referencia aunque no lleguen al umbral
     const allAvailable = bestPerMatch.filter(item => item.legs[0]&&item.legs[0].market);
     if(allAvailable.length > 0){
