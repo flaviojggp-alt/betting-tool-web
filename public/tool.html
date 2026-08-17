@@ -4212,7 +4212,22 @@ function applyFeedbackAdj(bet, leagueKey) {
 
 function generateCombos(matchData){
   const ODDS_LIMIT = parseFloat(document.getElementById('odds-limit')?.value || 2.0);
-  const allBets=matchData.map(m=>({label:`${m.home.name} vs ${m.away.name}`,bets:calcBets(m),match:m})); // match included for Kelly/EV
+  // BUGFIX: antes calcBets(m) se llamaba sin manejo de errores dentro de un
+  // .map() -- si UN SOLO partido lanzaba una excepcion, TODO el lote fallaba
+  // (bestPerMatch quedaba vacio, "Partidos analizados: 0" para todos, aunque
+  // los otros partidos estuvieran perfectamente bien). Ahora cada partido se
+  // aisla: si uno falla, se salta con un aviso, y los demas se procesan
+  // normalmente.
+  const allBets = matchData.map(function(m) {
+    let bets = [];
+    try {
+      bets = calcBets(m);
+    } catch (e) {
+      console.error('calcBets fallo para ' + m.home.name + ' vs ' + m.away.name + ':', e);
+      showToast('Error analizando ' + m.home.name + ' vs ' + m.away.name + ': ' + e.message, 'error', 6000);
+    }
+    return { label: `${m.home.name} vs ${m.away.name}`, bets: bets, match: m };
+  });
 
   // SECCIÓN 1: Mejor jugada por partido (sin límite de cuota)
   // Top 2 apuestas por partido — con diversificación de mercados
