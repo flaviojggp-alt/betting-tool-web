@@ -2818,14 +2818,10 @@ function calcBets(m){
   // resultados recientes del H2H disponible. Se actualiza automaticamente.
   const elo = eloWinProb(m.home.id, m.away.id);
   const eloHasData = elo.homeElo !== ELO_DEFAULT || elo.awayElo !== ELO_DEFAULT;
-  const eloFavorsHome = elo.ratingDiff >= 40;
-  const eloFavorsAway = elo.ratingDiff <= -40;
   const eloTag = eloHasData && Math.abs(elo.ratingDiff) >= 40 ? ' +Elo' : '';
   const eloNote = eloHasData && Math.abs(elo.ratingDiff) >= 60
     ? ` · Elo: ${m.home.name} ${elo.homeElo} vs ${m.away.name} ${elo.awayElo} (dif. ${Math.abs(Math.round(elo.ratingDiff))})`
     : '';
-  // Ajuste de confianza en victorias: Elo es independiente del ranking de tabla
-  const eloVictAdj = eloHasData ? Math.round(elo.ratingDiff / 15) : 0; // +/-1 punto por cada 15 de diferencia
   const ref=m.refereeStats, weather=m.weather;
   const imp=m.importance;
   const hGM=m.homeGoalMin, aGM=m.awayGoalMin;
@@ -3269,7 +3265,6 @@ function calcBets(m){
   const cB=h2h&&h2h.sampleSize>=5&&h2h.avgCorners>=9?6:0;
   const predWH=pred?.found&&pred.winner?.id===m.home.id;
   const predWA=pred?.found&&pred.winner?.id===m.away.id;
-  const pB=pred?.found?5:0;
   const impNote=isHighStakes&&imp.notes?.length?` · 🔥${imp.notes[0]}`:'';
   const weatherNote=isRainy?` · 🌧️${weather.precipProb} lluvia`:weather?.temp?` · ${weather.temp}`:'';
   const refNote=ref?` · Árb: ${ref.avgCards.toFixed(1)} tarj/pj (${ref.strictness})`:'';
@@ -3449,37 +3444,57 @@ function calcBets(m){
   const aCornersExp = aCornersAgainst !== null
     ? (aCornersSafe + aCornersAgainst) / 2   // visitante: promedia corners generados vs concedidos por rival
     : aCornersSafe;
+  // Probabilidad real P(X <= k) para X ~ Poisson(lambda) -- suma directa,
+  // estable para los rangos tipicos de corners/tarjetas (lambda chico).
+  // Reemplaza formulas lineales inventadas (ej. 50 + diferencia*10) por la
+  // probabilidad matematica real de la distribucion, mismo principio ya
+  // usado para goles (Poisson + Monte Carlo) y ahora tambien para victoria.
+  function poissonCDF(lambda, k) {
+    if (lambda <= 0) return k >= 0 ? 1 : 0;
+    if (k < 0) return 0;
+    let sum = 0, term = Math.exp(-lambda);
+    for (let i = 0; i <= k; i++) {
+      if (i > 0) term *= lambda / i;
+      sum += term;
+    }
+    return Math.min(1, sum);
+  }
+
   const totalCornersRaw = hCornersExp + aCornersExp + weatherCornersAdj + hPressingCornersAdj + aPressingCornersAdj;
   // MEJORA: rango realista de corners totales es aprox. 2-16.
   const totalCorners = Math.max(2, Math.min(16, totalCornersRaw));
-  if (totalCorners >= 7.0) {
-    const cornersLine = totalCorners >= 11 ? 10.5 : totalCorners >= 9.0 ? 8.5 : 7.5;
-    const cornersConf = Math.min(85, Math.round(50 + (totalCorners - cornersLine) * 10 + (isRainy ? -5 : 0) + (hDefReliable && aDefReliable ? 5 : -5)));
+  // MEJORA ESTRUCTURAL: antes la confianza salia de "50 + (diferencia)*10"
+  // -- una escala lineal inventada. Ahora se elige la linea de mercado mas
+  // cercana al valor esperado (igual que ofrecen las casas reales) y se
+  // calcula la probabilidad REAL de Poisson de quedar arriba o abajo de esa
+  // linea, en vez de una formula de puntos.
+  const cornersLineCandidates = [5.5,6.5,7.5,8.5,9.5,10.5];
+  const bestCornersLine = cornersLineCandidates.reduce(function(best,l){
+    return Math.abs(l-totalCorners) < Math.abs(best-totalCorners) ? l : best;
+  }, cornersLineCandidates[0]);
+  const cornersUnderProb = poissonCDF(totalCorners, Math.floor(bestCornersLine));
+  const cornersOverProb = 1 - cornersUnderProb;
+  const cornersDataBonus = (hDefReliable && aDefReliable) ? 0.03 : -0.03;
+  if (cornersOverProb >= 0.55) {
+    const cornersConf = Math.min(85, Math.round((cornersOverProb + cornersDataBonus + (isRainy?-0.03:0)) * 100));
     if (cornersConf >= 52) {
       bets.push({
-        market: `Mas de ${cornersLine} corners`,
-        odds: cornersLine >= 10.5 ? 1.95 : 1.80,
+        market: `Mas de ${bestCornersLine} corners`,
+        odds: bestCornersLine >= 10.5 ? 1.95 : 1.80,
         confidence: cornersConf,
-        factors: 'COR' + (isRainy ? ' Lluvia-' : ''),
-        reason: `${m.home.name}: ${hCornersSafe.toFixed(1)} · ${m.away.name}: ${aCornersSafe.toFixed(1)} corners/pj (total ${totalCorners.toFixed(1)})${isRainy ? ' · lluvia reduce ligeramente' : ''}`
+        factors: 'COR-Poisson' + (isRainy ? ' Lluvia-' : ''), modelVersion: 'v2-blend',
+        reason: `Poisson (λ=${totalCorners.toFixed(1)}): ${Math.round(cornersOverProb*100)}% probabilidad real de superar ${bestCornersLine}${isRainy ? ' · lluvia reduce ligeramente' : ''}`
       });
     }
-  } else if (totalCorners <= 7.5 && totalCorners > 0) {
-    // BUGFIX: antes esto SIEMPRE mostraba "Menos de 8.5 corners" sin importar
-    // el valor real de totalCorners, mientras la confianza se calculaba contra
-    // un umbral fijo de 7.5 -- la etiqueta no coincidia con lo que el modelo
-    // realmente evaluaba. Ahora la linea escala igual que en el mercado "Mas
-    // de", evitando que el mismo texto aparezca en partidos con perfiles de
-    // corners muy distintos.
-    const cornersLine = totalCorners <= 5.0 ? 6.5 : totalCorners <= 6.0 ? 7.5 : 8.5;
-    const cornersConf = Math.min(80, Math.round(50 + (cornersLine - totalCorners) * 10 + (hDefReliable && aDefReliable ? 5 : -5)));
+  } else if (cornersUnderProb >= 0.55) {
+    const cornersConf = Math.min(80, Math.round((cornersUnderProb + cornersDataBonus) * 100));
     if (cornersConf >= 52) {
       bets.push({
-        market: `Menos de ${cornersLine} corners`,
-        odds: cornersLine <= 6.5 ? 2.05 : cornersLine <= 7.5 ? 1.95 : 1.85,
+        market: `Menos de ${bestCornersLine} corners`,
+        odds: bestCornersLine <= 6.5 ? 2.05 : bestCornersLine <= 7.5 ? 1.95 : 1.85,
         confidence: cornersConf,
-        factors: 'COR',
-        reason: `${m.home.name}: ${hCornersSafe.toFixed(1)} · ${m.away.name}: ${aCornersSafe.toFixed(1)} corners/pj (total ${totalCorners.toFixed(1)}, partido cerrado)`
+        factors: 'COR-Poisson', modelVersion: 'v2-blend',
+        reason: `Poisson (λ=${totalCorners.toFixed(1)}): ${Math.round(cornersUnderProb*100)}% probabilidad real de quedar bajo ${bestCornersLine}`
       });
     }
   }
@@ -3498,16 +3513,23 @@ function calcBets(m){
   const totalCardsRaw = hCardsExp + aCardsExp + (ref?.avgCards ? (ref.avgCards - 4.0) * 0.3 : 0) + weatherCardsAdj + (necDiff !== 0 || isHighStakes ? 0.3 : 0) + knockoutCardsAdj;
   // MEJORA: rango realista de tarjetas totales es aprox. 0.5-9.
   const totalCards = Math.max(0.5, Math.min(9, totalCardsRaw));
-  if (totalCards >= 3.5) {
-    const cardsLine = totalCards >= 5.0 ? 4.5 : totalCards >= 4.0 ? 3.5 : 2.5;
-    const cardsConf = Math.min(85, Math.round(52 + (totalCards - cardsLine) * 12 + (ref?.strictness === 'estricto' ? 6 : 0) + (isHighStakes ? 4 : 0) + (hDefReliable && aDefReliable ? 4 : -4)));
+  // MEJORA ESTRUCTURAL: mismo cambio que en corners -- probabilidad real de
+  // Poisson en vez de una escala lineal inventada (52 + diferencia*12).
+  const cardsLineCandidates = [2.5,3.5,4.5,5.5];
+  const bestCardsLine = cardsLineCandidates.reduce(function(best,l){
+    return Math.abs(l-totalCards) < Math.abs(best-totalCards) ? l : best;
+  }, cardsLineCandidates[0]);
+  const cardsOverProb = 1 - poissonCDF(totalCards, Math.floor(bestCardsLine));
+  const cardsDataBonus = (hDefReliable && aDefReliable) ? 0.02 : -0.02;
+  if (cardsOverProb >= 0.55) {
+    const cardsConf = Math.min(85, Math.round((cardsOverProb + cardsDataBonus + (ref?.strictness === 'estricto' ? 0.04 : 0) + (isHighStakes ? 0.03 : 0)) * 100));
     if (cardsConf >= 52) {
       bets.push({
-        market: `Mas de ${cardsLine} tarjetas`,
-        odds: cardsLine >= 4.5 ? 1.95 : 1.75,
+        market: `Mas de ${bestCardsLine} tarjetas`,
+        odds: bestCardsLine >= 4.5 ? 1.95 : 1.75,
         confidence: cardsConf,
-        factors: 'CARDS' + (ref?.strictness === 'estricto' ? ' +Arb' : '') + (isHighStakes ? ' +Imp' : ''),
-        reason: `${m.home.name}: ${hCardsSafe.toFixed(1)} · ${m.away.name}: ${aCardsSafe.toFixed(1)} tarjetas/pj${ref ? ` · arbitro ${ref.strictness} (${ref.avgCards.toFixed(1)}/pj)` : ''}${isHighStakes ? ' · partido de alta intensidad' : ''}`
+        factors: 'CARDS-Poisson' + (ref?.strictness === 'estricto' ? ' +Arb' : '') + (isHighStakes ? ' +Imp' : ''), modelVersion: 'v2-blend',
+        reason: `Poisson (λ=${totalCards.toFixed(1)}): ${Math.round(cardsOverProb*100)}% probabilidad real de superar ${bestCardsLine}${ref ? ` · arbitro ${ref.strictness} (${ref.avgCards.toFixed(1)}/pj)` : ''}${isHighStakes ? ' · partido de alta intensidad' : ''}`
       });
     }
   }
@@ -3575,32 +3597,58 @@ function calcBets(m){
     }
   }
 
-  // ── 9. RESULTADO por H2H / Predicción ──
-  if(h2h&&h2h.sampleSize>=5&&h2h.homeWinRate>=0.6&&m.odds.h<=1.80) bets.push({market:`Victoria ${m.home.name}`,odds:m.odds.h,confidence:Math.min(87,65+h2h.homeWinRate*20+(predWH?pB:0)),factors:'H2H'+(predWH?' +Pred':''),reason:`Gana ${Math.round(h2h.homeWinRate*100)}% H2H${predWH?' · API predice local':''}${impNote}`});
-  if(predWA&&m.odds.a<=1.80&&(!h2h||h2h.awayWinRate>=0.4)) bets.push({market:`Victoria ${m.away.name}`,odds:m.odds.a,confidence:Math.min(82,Math.max(40,65+pB-necVictAdj-eloVictAdj)),factors:'Pred'+necTag+tramiteTag+eloTag,reason:`API predice visitante (${pred.percent?.away||''})${necNote}`});
-
-  // Victoria por dominio estadistico (sin necesitar prediccion API)
-  // Condiciones: xG superior + forma mejor + diferencia de ranking + cuota razonable
-  if(!predWH && !predWA) {
-    const rankDiff = (h.teamRank && a.teamRank) ? a.teamRank - h.teamRank : 0; // positivo = local mejor rankeado
+  // ── 9. RESULTADO (victoria) -- probabilidad combinada ──────────────────────
+  // MEJORA ESTRUCTURAL: antes habia 5 formulas separadas para victoria, cada
+  // una sumando "bonos" de puntos inventados sobre una base arbitraria --
+  // varias median la MISMA señal subyacente dos o tres veces. Ahora se
+  // combinan las fuentes disponibles como PROBABILIDADES reales, ponderadas
+  // por confiabilidad -- mismo principio que ya usa goles.
+  function blendVictoryProbability(isHome) {
+    const sources = [];
+    if (eloHasData) {
+      sources.push({ prob: isHome ? elo.homeProb : elo.awayProb, weight: 3 });
+    }
+    if (h2h && h2h.sampleSize >= 3) {
+      const p = isHome ? h2h.homeWinRate : h2h.awayWinRate;
+      sources.push({ prob: p, weight: Math.min(4, h2h.sampleSize * 0.5) });
+    }
+    const apiProb = isHome
+      ? (predWH ? parseFloat(pred.percent?.home)/100 : null)
+      : (predWA ? parseFloat(pred.percent?.away)/100 : null);
+    if (apiProb != null && !isNaN(apiProb)) {
+      sources.push({ prob: apiProb, weight: 2 });
+    }
+    const rankDiff = (h.teamRank && a.teamRank) ? a.teamRank - h.teamRank : 0;
     const hXGdom = hXGdata && aXGdata ? (hXGdata.avgXG||0) - (aXGdata.avgXG||0) : 0;
     const hFormAdv = (h.form?.last5Goals||0) - (a.form?.last5Goals||0);
-    const homeStrong = (rankDiff >= 5 || eloFavorsHome) && hXGdom >= 0.4 && hFormAdv >= 0.3 && m.odds.h <= 2.10;
-    const awayStrong = (rankDiff <= -5 || eloFavorsAway) && hXGdom <= -0.4 && hFormAdv <= -0.3 && m.odds.a <= 2.10;
-    if (homeStrong) {
-      const domConf = Math.min(76, 58 + rankDiff*0.8 + hXGdom*10 + (aLuck>0.5?5:0));
-      bets.push({market:`Victoria ${m.home.name}`,odds:m.odds.h,confidence:Math.round(domConf),
-        factors:'DOM +xG +Rk' + luckTag,
-        reason:`Local domina: xG +${hXGdom.toFixed(2)}, ranking +${rankDiff} pos${luckNote}`});
+    const domScore = (isHome ? 1 : -1) * (rankDiff*0.01 + hXGdom*0.15 + hFormAdv*0.1);
+    if (Math.abs(domScore) > 0.05) {
+      sources.push({ prob: Math.min(0.85, Math.max(0.15, 0.5 + domScore)), weight: 1.5 });
     }
-    if (awayStrong) {
-      const domConf = Math.min(74, 56 + Math.abs(rankDiff)*0.8 + Math.abs(hXGdom)*10 + (hLuck>0.5?5:0));
-      bets.push({market:`Victoria ${m.away.name}`,odds:m.odds.a,confidence:Math.round(domConf),
-        factors:'DOM +xG +Rk' + luckTag,
-        reason:`Visitante domina: xG +${Math.abs(hXGdom).toFixed(2)}, ranking +${Math.abs(rankDiff)} pos${luckNote}`});
-    }
+    if (!sources.length) return null;
+    const totalWeight = sources.reduce(function(s,x){ return s+x.weight; }, 0);
+    const blended = sources.reduce(function(s,x){ return s+x.prob*x.weight; }, 0) / totalWeight;
+    return { prob: blended, n: sources.length };
   }
-  if(predWH&&(!h2h||h2h.homeWinRate<0.6)&&m.odds.h<=2.20) bets.push({market:`Victoria ${m.home.name}`,odds:m.odds.h,confidence:Math.min(78,Math.max(40,60+pB+necVictAdj+eloVictAdj+rivalQualityAdj)),factors:'Pred'+necTag+tramiteTag+eloTag,reason:`API predice local (${pred.percent?.home||''})${necNote}${eloNote}`});
+
+  const homeBlend = blendVictoryProbability(true);
+  if (homeBlend && m.odds.h <= 2.20) {
+    let adjProb = homeBlend.prob + (necVictAdj/100)*0.4 + (rivalQualityAdj/100)*0.4;
+    adjProb = Math.min(0.90, Math.max(0.35, adjProb));
+    const conf = Math.round(adjProb*100);
+    bets.push({market:`Victoria ${m.home.name}`,odds:m.odds.h,confidence:conf,
+      factors:'Blend('+homeBlend.n+')'+necTag+tramiteTag+eloTag, modelVersion:'v2-blend',
+      reason:`Probabilidad combinada de ${homeBlend.n} fuente(s) (ELO+H2H+API+dominio): ${conf}%${necNote}${eloNote}${impNote}`});
+  }
+  const awayBlend = blendVictoryProbability(false);
+  if (awayBlend && m.odds.a <= 2.20) {
+    let adjProb = awayBlend.prob - (necVictAdj/100)*0.4;
+    adjProb = Math.min(0.90, Math.max(0.35, adjProb));
+    const conf = Math.round(adjProb*100);
+    bets.push({market:`Victoria ${m.away.name}`,odds:m.odds.a,confidence:conf,
+      factors:'Blend('+awayBlend.n+')'+necTag+tramiteTag+eloTag, modelVersion:'v2-blend',
+      reason:`Probabilidad combinada de ${awayBlend.n} fuente(s) (ELO+H2H+API+dominio): ${conf}%${necNote}`});
+  }
 
   // ── DETECCION AUTOMATICA DE VALUE BETS ──────────────────────────────────
   // Compara probabilidad del modelo vs probabilidad implicita del mercado
@@ -3643,8 +3691,8 @@ function calcBets(m){
       }
     }
   });
-  const activeBets = bets.filter(function(b){ return !shouldBlockBet(b); });
-  m.blockedBets = bets.filter(shouldBlockBet).map(function(b){ return { market: b.market, confidence: b.confidence }; });
+  const activeBets = bets.filter(function(b){ return !shouldBlockBet(b, m.league); });
+  m.blockedBets = bets.filter(function(b){ return shouldBlockBet(b, m.league); }).map(function(b){ return { market: b.market, confidence: b.confidence }; });
   return activeBets.sort((a,b)=>b.confidence-a.confidence);
 }
 
@@ -3920,6 +3968,21 @@ function getMarketBandCalibration(market, confidence) {
   return { gap: Math.round((realRate-avgConf)*100), n: inCombo.length, realPct: Math.round(realRate*100), predPct: Math.round(avgConf*100) };
 }
 
+function getBandWideBias(confidence) {
+  const bandData = getCalibrationPlotData().find(function(d){ return confidence >= d.min && confidence < d.max; });
+  if (!bandData || bandData.n < 20 || bandData.real == null) return null;
+  return { gap: Math.round(bandData.real - bandData.predicted), n: bandData.n };
+}
+
+function getLeagueBias(leagueKey) {
+  if (!leagueKey) return null;
+  const h = getHistory().filter(function(b){ return b.result !== 'pending' && b.league === leagueKey; });
+  if (h.length < 15) return null;
+  const realRate = h.filter(function(b){ return b.result === 'win'; }).length / h.length;
+  const avgConf = h.reduce(function(s,b){ return s+(b.confidence||70); }, 0) / h.length / 100;
+  return { gap: Math.round((realRate-avgConf)*100), n: h.length };
+}
+
 function getBetCalibrationWarning(bet) {
   // Señal principal: la interseccion exacta mercado+banda, mas sensible
   // (gap<=-15) porque es una señal mas precisa que las marginales por separado.
@@ -3954,7 +4017,7 @@ function getBetCalibrationWarning(bet) {
 // Escala la advertencia a un bloqueo total cuando el patron es severo y ya
 // esta bien respaldado por muestra. No esta hardcodeado a "corners" -- se
 // adapta solo si el patron mejora o aparece en otro mercado.
-function shouldBlockBet(bet) {
+function shouldBlockBet(bet, leagueKey) {
   const warning = getBetCalibrationWarning(bet);
   // MEJORA: antes solo bloqueaba si confidence>=80, lo cual dejaba pasar el
   // mismo patron severo detectado en bandas mas bajas (ej. corners en 60-70%)
@@ -3971,7 +4034,18 @@ function shouldBlockBet(bet) {
   const inCat = h.filter(function(b){ return getMarketCategory(b.market) === targetCat; });
   const marketWideBlock = inCat.length >= 30 && getMarketCalibrationAdj(bet.market) <= -12;
 
-  return patternBlock || marketWideBlock;
+  // Bloqueo de banda de confianza completa: si TODA una banda (todos los
+  // mercados combinados) resulta sistematicamente sobreconfiada con muestra
+  // solida, bloquear cualquier jugada de esa banda sin importar el mercado.
+  const bandBias = getBandWideBias(bet.confidence);
+  const bandWideBlock = !!(bandBias && bandBias.n >= 20 && bandBias.gap <= -30);
+
+  // Bloqueo de liga completa: si una liga especifica ya tiene muestra
+  // confiable y sesgo severo confirmado, bloquear jugadas de esa liga.
+  const leagueBias = getLeagueBias(leagueKey);
+  const leagueWideBlock = !!(leagueBias && leagueBias.n >= 15 && leagueBias.gap <= -25);
+
+  return patternBlock || marketWideBlock || bandWideBlock || leagueWideBlock;
 }
 
 // ── NIVEL 3: Calibracion por liga ────────────────────────────────────────────
@@ -4076,6 +4150,38 @@ function getAllMarketLeagueCombos() {
 
 function getWorstMarketLeagueCombos() {
   return getAllMarketLeagueCombos().filter(function(c){ return c.gap <= -15; });
+}
+
+// ── COMPARACION DE MODELOS (formula vieja vs. probabilidad combinada) ──────
+// Solo compara los mercados que realmente se reestructuraron (victoria,
+// corners, tarjetas) -- las apuestas viejas (sin modelVersion) usan las
+// formulas de puntos originales; las nuevas ('v2-blend') usan probabilidad
+// real (ELO/Poisson) en vez de bonos inventados. Restringido a estos 3
+// mercados para que la comparacion sea de manzanas con manzanas -- otros
+// mercados (goles, BTTS, etc.) no se tocaron y no deberian mezclarse aqui.
+function getModelVersionComparison() {
+  const RESTRUCTURED_CATS = ['result', 'corners', 'cards'];
+  const h = getHistory().filter(function(b){
+    return b.result !== 'pending' && RESTRUCTURED_CATS.indexOf(getMarketCategory(b.market)) !== -1;
+  });
+  const groups = {};
+  h.forEach(function(b) {
+    const v = b.modelVersion || 'v1 (formula anterior)';
+    if (!groups[v]) groups[v] = { total:0, wins:0, confSum:0 };
+    groups[v].total++;
+    groups[v].confSum += (b.confidence||70);
+    if (b.result === 'win') groups[v].wins++;
+  });
+  return Object.entries(groups).map(function(e) {
+    const d = e[1];
+    const winRate = d.total ? d.wins/d.total : 0;
+    const avgConf = d.total ? d.confSum/d.total/100 : 0;
+    return {
+      version: e[0], total: d.total, wins: d.wins,
+      winRatePct: Math.round(winRate*100), predPct: Math.round(avgConf*100),
+      gap: Math.round((winRate-avgConf)*100), ci: wilsonInterval(d.wins, d.total),
+    };
+  }).sort(function(a,b){ return b.total - a.total; });
 }
 
 // ── APLICADOR COMBINADO ───────────────────────────────────────────────────────
@@ -5162,6 +5268,23 @@ function renderProAnalysis() {
           + '</div>';
       });
       html += '</div></details>';
+    }
+    // Comparacion formula vieja vs. probabilidad combinada (solo victoria,
+    // corners, tarjetas -- los mercados reestructurados)
+    var modelComparison = getModelVersionComparison();
+    if (modelComparison.length > 0) {
+      html += '<p style="font-size:12px;font-weight:500;color:#555;margin-top:10px;margin-bottom:6px;">Comparacion de modelos (victoria/corners/tarjetas):</p>';
+      modelComparison.forEach(function(mc) {
+        var mcColor = mc.gap >= 0 ? '#3B6D11' : '#A32D2D';
+        html += '<div style="background:#f5f5f0;border-radius:6px;padding:8px 10px;margin-bottom:6px;font-size:11px;">'
+          + '<div style="display:flex;justify-content:space-between;font-weight:600;">'
+          + '<span>' + mc.version + '</span>'
+          + '<span>n=' + mc.total + ' · ' + mc.wins + ' aciertos</span>'
+          + '</div>'
+          + '<div style="color:#999;margin-top:2px;">Real: ' + mc.winRatePct + '% (IC 95%: ' + mc.ci.low + '-' + mc.ci.high + '%) vs predicho ' + mc.predPct + '% · <span style="color:' + mcColor + ';font-weight:600;">' + (mc.gap>=0?'+':'') + mc.gap + ' pts</span></div>'
+          + '</div>';
+      });
+      html += '<p style="font-size:10px;color:#999;margin-bottom:8px;">Con poca muestra en "v2-blend" todavia, mira el IC 95% antes de sacar conclusiones -- necesitas varias semanas de datos nuevos para comparar de forma confiable.</p>';
     }
     if (Object.keys(factorCorr).length > 0) {
       html += '<p style="font-size:12px;font-weight:500;color:#555;margin-bottom:6px;">Factores mas predictivos (Nivel 4):</p><div style="display:flex;flex-wrap:wrap;gap:6px;">';
