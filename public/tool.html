@@ -653,6 +653,79 @@ async function restoreHistoryFromCloud() {
   }
 }
 
+// ── RESTAURAR BANCA DESDE LA NUBE ────────────────────────────────────────────
+// bk.transactions tambien vive solo en localStorage y se pierde igual que el
+// Historial. Se reconstruye desde DOS fuentes: la tabla 'bets' (tiene
+// odds/confidence/result -- mejor fuente para las transacciones tipo "bet",
+// ya que bankroll_transactions no guarda esos campos) y 'bankroll_transactions'
+// (unica fuente para depositos/retiros). El saldo actual se recalcula desde
+// cero en vez de confiar en un numero que tambien pudo perderse.
+async function restoreBankrollFromCloud() {
+  if (!_sb || !_sbUser) { showToast('Conecta la nube primero', 'warning'); return; }
+  try {
+    const { data: sessionData } = await _sb.auth.getSession();
+    const token = sessionData?.session?.access_token;
+    if (!token) { showToast('Sesion de nube expirada, reconecta', 'warning'); return; }
+
+    const betsRes = await fetch(SUPABASE_URL + '/rest/v1/bets?user_id=eq.' + _sbUser.id + '&order=created_at.asc', {
+      headers: { 'apikey': SUPABASE_KEY, 'Authorization': 'Bearer ' + token },
+    });
+    const cloudBets = betsRes.ok ? await betsRes.json() : [];
+
+    const txRes = await fetch(SUPABASE_URL + '/rest/v1/bankroll_transactions?user_id=eq.' + _sbUser.id + '&type=in.(deposit,withdrawal)&order=created_at.asc', {
+      headers: { 'apikey': SUPABASE_KEY, 'Authorization': 'Bearer ' + token },
+    });
+    const cloudDepWith = txRes.ok ? await txRes.json() : [];
+
+    if (!cloudBets.length && !cloudDepWith.length) {
+      showToast('No hay datos de banca en la nube', 'info');
+      return;
+    }
+
+    const bk = getBK();
+    bk.transactions = bk.transactions || [];
+    const localKeys = new Set(bk.transactions.map(function(t){ return (t.match||'') + '|' + (t.market||'') + '|' + (t.date||'').slice(0,10); }));
+    let restored = 0;
+
+    cloudBets.forEach(function(cb) {
+      const key = (cb.match||'') + '|' + (cb.market||'') + '|' + (cb.created_at||'').slice(0,10);
+      if (localKeys.has(key)) return;
+      const status = cb.result === 'pending' ? 'pending' : cb.result === 'win' ? 'won' : 'lost';
+      const betId = Date.now() + restored;
+      bk.transactions.push({
+        id: betId, date: cb.created_at, type: 'bet',
+        match: cb.match, market: cb.market, odds: cb.odds, confidence: cb.confidence,
+        amount: cb.amount || 0, potentialWin: +((cb.amount||0)*((cb.odds||1)-1)).toFixed(2),
+        status: status, bookmaker: bk.settings?.bookmaker || 'Bet365',
+        fixtureId: null, league: cb.league || null,
+      });
+      if (status === 'won') {
+        bk.transactions.push({
+          id: betId + 1, date: cb.settled_at || cb.created_at, type: 'return',
+          amount: +((cb.amount||0)*(cb.odds||1)).toFixed(2), relatedId: betId, match: cb.match, market: cb.market,
+        });
+      }
+      localKeys.add(key);
+      restored++;
+    });
+
+    cloudDepWith.forEach(function(t) {
+      bk.transactions.push({ id: Date.now() + restored + 500000, date: t.created_at, type: t.type === 'withdrawal' ? 'withdraw' : 'deposit', amount: t.amount });
+      restored++;
+    });
+
+    // Recalcular el saldo desde cero: inicial + depositos - retiros - apostado + retornado
+    const sumType = function(type) { return bk.transactions.filter(function(t){ return t.type === type; }).reduce(function(s,t){ return s+t.amount; }, 0); };
+    bk.current = +(bk.initial + sumType('deposit') - sumType('withdraw') - sumType('bet') + sumType('return')).toFixed(2);
+
+    saveBK(bk);
+    showToast(restored > 0 ? 'Restauradas ' + restored + ' transaccion(es). Saldo recalculado: ' + bk.currency + bk.current.toFixed(2) : 'Todo lo de la nube ya estaba local', 'success', 6000);
+    renderBankroll();
+  } catch(e) {
+    showToast('Error al restaurar banca desde la nube: ' + e.message, 'error', 6000);
+  }
+}
+
 
 // ── NOTIFICATIONS ─────────────────────────────────────────────────────────
 function showToast(msg, type, ms) {
@@ -1884,7 +1957,8 @@ function renderBankroll(){
       ${(function(){
         const d = getSyncDiscrepancies();
         if (d.bkTotal === d.histTotal) return '';
-        return `<button onclick="showSyncDiagnostic()" style="width:100%;margin-top:10px;background:#FFF5E6;border:1px solid #f0d080;color:#854F0B;border-radius:8px;padding:8px;font-size:12px;cursor:pointer;">⚠️ Banca y Historial no coinciden (${d.bkTotal} vs ${d.histTotal}) — ver diagnóstico</button>`;
+        return `<button onclick="showSyncDiagnostic()" style="width:100%;margin-top:10px;background:#FFF5E6;border:1px solid #f0d080;color:#854F0B;border-radius:8px;padding:8px;font-size:12px;cursor:pointer;">⚠️ Banca y Historial no coinciden (${d.bkTotal} vs ${d.histTotal}) — ver diagnóstico</button>
+        <button onclick="restoreBankrollFromCloud()" style="width:100%;margin-top:6px;background:#E6F1FB;border:1px solid #185FA5;color:#185FA5;border-radius:8px;padding:8px;font-size:12px;cursor:pointer;">☁️ Restaurar banca desde la nube</button>`;
       })()}
     </div>
 
