@@ -607,6 +607,22 @@ async function syncAllToCloud() {
 // local. Esta funcion trae todo lo que hay en Supabase y lo mezcla con lo
 // local, sin duplicar lo que ya existe (empareja por partido+mercado+fecha,
 // el mismo criterio que usa el guardado a la nube).
+// Convierte el UUID de Supabase (string) en un numero entero positivo estable
+// -- MISMO id sin importar cuantas veces se recalcule, para que la MISMA
+// apuesta logica reciba el MISMO id en Historial y en Banca al restaurar.
+// Antes cada restauracion inventaba su propio id con Date.now(), asi que la
+// misma apuesta terminaba con ids distintos en cada lado -- liquidar en
+// Banca nunca encontraba la contraparte en Historial para sincronizar.
+function hashBetId(uuid) {
+  let hash = 0;
+  const s = String(uuid);
+  for (let i = 0; i < s.length; i++) {
+    hash = ((hash << 5) - hash + s.charCodeAt(i)) | 0;
+  }
+  // Positivo y con margen para +1 (retorno) sin invadir el siguiente id
+  return (Math.abs(hash) * 10) + 1000000000;
+}
+
 async function restoreHistoryFromCloud() {
   if (!_sb || !_sbUser) { showToast('Conecta la nube primero', 'warning'); return; }
   try {
@@ -626,13 +642,14 @@ async function restoreHistoryFromCloud() {
     cloudBets.forEach(function(cb, i) {
       const key = (cb.match||'') + '|' + (cb.market||'') + '|' + (cb.created_at||'').slice(0,10);
       if (localKeys.has(key)) return; // ya existe localmente, no duplicar
-      // BUGFIX: antes se usaba id:'cloud_'+cb.id (string) -- los botones de
-      // liquidar insertan el id SIN comillas dentro del onclick
-      // (settleFromHistory(${b.id},true)), asi que un id de texto generaba
-      // JavaScript invalido y el boton no hacia nada al tocarlo. Ahora se usa
-      // un id numerico, igual que el resto del sistema.
+      // MEJORA: antes se usaba Date.now()+i (numero inventado, distinto cada
+      // vez que se restauraba, y distinto al que generaba restoreBankrollFromCloud
+      // para la MISMA apuesta) -- esto rompia la sincronizacion entre Historial
+      // y Banca, ya que liquidar en un lado busca por id compartido en el otro.
+      // Ahora se usa un hash estable del UUID real de Supabase, igual en ambas
+      // restauraciones.
       local.push({
-        id: Date.now() + i,
+        id: hashBetId(cb.id),
         date: cb.created_at,
         match: cb.match,
         market: cb.market,
@@ -696,14 +713,12 @@ async function restoreBankrollFromCloud() {
       const key = (cb.match||'') + '|' + (cb.market||'') + '|' + (cb.created_at||'').slice(0,10);
       if (localKeys.has(key)) return;
       const status = cb.result === 'pending' ? 'pending' : cb.result === 'win' ? 'won' : 'lost';
-      // BUGFIX: antes betId=Date.now()+restored podia CHOCAR con el id+1 (de
-      // retorno) de la apuesta anterior, ya que Date.now() no avanza entre
-      // iteraciones de un forEach sincrono -- dos entradas terminaban con el
-      // mismo id, y los botones de liquidar actuaban sobre la entrada
-      // equivocada (o ninguna). Ahora cada apuesta usa un slot PAR dedicado
-      // (restored*2) y su retorno opcional usa el slot IMPAR siguiente,
-      // sin posibilidad de choque dentro del lote restaurado.
-      const betId = restoreBaseId + restored*2;
+      // MEJORA: antes se usaba restoreBaseId+restored*2 (numero local a esta
+      // funcion) -- distinto al id que restoreHistoryFromCloud generaba para
+      // la MISMA apuesta, rompiendo la sincronizacion al liquidar. Ahora usa
+      // el mismo hash estable del UUID de Supabase que usa Historial, asi
+      // ambos lados coinciden para la misma apuesta logica.
+      const betId = hashBetId(cb.id);
       bk.transactions.push({
         id: betId, date: cb.created_at, type: 'bet',
         match: cb.match, market: cb.market, odds: cb.odds, confidence: cb.confidence,
@@ -1720,6 +1735,33 @@ function getSyncDiscrepancies() {
   };
 }
 
+// Repara Historial y Banca que quedaron desincronizados por restauraciones
+// ANTERIORES a este fix (que generaban ids distintos para la misma apuesta
+// en cada lado). Como esas entradas ya perdieron el UUID original de
+// Supabase, no se puede recalcular el hash compartido -- en su lugar, se
+// emparejan por contenido (partido+mercado+fecha cercana) y se copia el
+// resultado REAL de Banca (que sí se liquido correctamente) hacia Historial.
+function reconcileHistoryWithBankroll() {
+  const bk = getBK();
+  const h = getHistory();
+  const betTxs = (bk.transactions||[]).filter(function(t){ return t.type === 'bet' && t.status !== 'pending'; });
+  let fixed = 0;
+  betTxs.forEach(function(tx) {
+    const match = h.find(function(b){
+      if (b.match !== tx.match || b.market !== tx.market || b.result !== 'pending') return false;
+      const daysDiff = Math.abs(new Date(b.date) - new Date(tx.date)) / (24*60*60*1000);
+      return daysDiff < 3; // margen por si las fechas no coinciden al segundo
+    });
+    if (match) {
+      match.result = tx.status === 'won' ? 'win' : 'loss';
+      fixed++;
+    }
+  });
+  if (fixed > 0) saveHistory(h);
+  showToast(fixed > 0 ? 'Se sincronizaron ' + fixed + ' resultado(s) de Banca hacia Historial' : 'No se encontraron desincronizaciones para reparar', 'success', 5000);
+  renderHistory();
+}
+
 function showSyncDiagnostic() {
   const d = getSyncDiscrepancies();
   const overlay = document.createElement('div');
@@ -1970,7 +2012,8 @@ function renderBankroll(){
         const d = getSyncDiscrepancies();
         if (d.bkTotal === d.histTotal) return '';
         return `<button onclick="showSyncDiagnostic()" style="width:100%;margin-top:10px;background:#FFF5E6;border:1px solid #f0d080;color:#854F0B;border-radius:8px;padding:8px;font-size:12px;cursor:pointer;">⚠️ Banca y Historial no coinciden (${d.bkTotal} vs ${d.histTotal}) — ver diagnóstico</button>
-        <button onclick="restoreBankrollFromCloud()" style="width:100%;margin-top:6px;background:#E6F1FB;border:1px solid #185FA5;color:#185FA5;border-radius:8px;padding:8px;font-size:12px;cursor:pointer;">☁️ Restaurar banca desde la nube</button>`;
+        <button onclick="restoreBankrollFromCloud()" style="width:100%;margin-top:6px;background:#E6F1FB;border:1px solid #185FA5;color:#185FA5;border-radius:8px;padding:8px;font-size:12px;cursor:pointer;">☁️ Restaurar banca desde la nube</button>
+        <button onclick="reconcileHistoryWithBankroll()" style="width:100%;margin-top:6px;background:#EAF3DE;border:1px solid #3B6D11;color:#3B6D11;border-radius:8px;padding:8px;font-size:12px;cursor:pointer;">🔧 Reparar: copiar resultados de Banca a Historial</button>`;
       })()}
     </div>
 
