@@ -686,12 +686,24 @@ async function restoreBankrollFromCloud() {
     bk.transactions = bk.transactions || [];
     const localKeys = new Set(bk.transactions.map(function(t){ return (t.match||'') + '|' + (t.market||'') + '|' + (t.date||'').slice(0,10); }));
     let restored = 0;
+    // Base fija calculada UNA sola vez -- cada apuesta restaurada obtiene un
+    // slot de 2 IDs dedicado (baseId+restored*2 para la apuesta, +1 para su
+    // retorno opcional), y los depositos/retiros usan un offset grande sobre
+    // la MISMA base -- todo evita cualquier choque de ids dentro del lote.
+    const restoreBaseId = Date.now();
 
     cloudBets.forEach(function(cb) {
       const key = (cb.match||'') + '|' + (cb.market||'') + '|' + (cb.created_at||'').slice(0,10);
       if (localKeys.has(key)) return;
       const status = cb.result === 'pending' ? 'pending' : cb.result === 'win' ? 'won' : 'lost';
-      const betId = Date.now() + restored;
+      // BUGFIX: antes betId=Date.now()+restored podia CHOCAR con el id+1 (de
+      // retorno) de la apuesta anterior, ya que Date.now() no avanza entre
+      // iteraciones de un forEach sincrono -- dos entradas terminaban con el
+      // mismo id, y los botones de liquidar actuaban sobre la entrada
+      // equivocada (o ninguna). Ahora cada apuesta usa un slot PAR dedicado
+      // (restored*2) y su retorno opcional usa el slot IMPAR siguiente,
+      // sin posibilidad de choque dentro del lote restaurado.
+      const betId = restoreBaseId + restored*2;
       bk.transactions.push({
         id: betId, date: cb.created_at, type: 'bet',
         match: cb.match, market: cb.market, odds: cb.odds, confidence: cb.confidence,
@@ -710,7 +722,7 @@ async function restoreBankrollFromCloud() {
     });
 
     cloudDepWith.forEach(function(t) {
-      bk.transactions.push({ id: Date.now() + restored + 500000, date: t.created_at, type: t.type === 'withdrawal' ? 'withdraw' : 'deposit', amount: t.amount });
+      bk.transactions.push({ id: restoreBaseId + 500000 + restored, date: t.created_at, type: t.type === 'withdrawal' ? 'withdraw' : 'deposit', amount: t.amount });
       restored++;
     });
 
