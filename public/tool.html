@@ -171,6 +171,15 @@ input[type=range] { flex: 1; accent-color: #1a1a1a; height: 4px; }
         </div>
       </div>
     </div>
+    <div style="background:#fff;border:1px solid #e5e5e5;border-radius:12px;padding:12px 16px;margin-bottom:10px;">
+      <p class="section-label" style="margin-bottom:6px;">Respaldo local completo</p>
+      <p style="font-size:11px;color:#999;margin-bottom:8px;">Descarga TODO lo guardado en este navegador (Historial, Banca, ELO, CLV) en un archivo. Si se borra el historial de navegacion, restauralo desde aqui -- mas confiable que depender solo de la nube.</p>
+      <p id="last-backup-label" style="font-size:11px;color:#999;margin-bottom:8px;"></p>
+      <div style="display:flex;gap:6px;">
+        <button onclick="exportFullBackup();renderLastBackupLabel();" style="flex:1;background:#1a1a1a;color:#fff;border:none;border-radius:8px;padding:9px;font-size:13px;cursor:pointer;">📥 Descargar respaldo</button>
+        <button onclick="triggerImportBackup()" style="flex:1;background:#f5f5f0;border:1px solid #ddd;border-radius:8px;padding:9px;font-size:13px;cursor:pointer;">📤 Restaurar archivo</button>
+      </div>
+    </div>
     <div class="warning">AVISO: Esta herramienta es de analisis estadistico. Las apuestas deportivas conllevan riesgo — juega con responsabilidad.</div>
   </div>
 
@@ -597,6 +606,98 @@ async function syncAllToCloud() {
   await syncLocalHistoryToCloud();
   await syncAllEloToCloud();
   await syncAllBankrollTxToCloud();
+}
+
+// ── RESPALDO COMPLETO LOCAL (descargar/restaurar archivo) ───────────────────
+const BACKUP_KEYS = [
+  'betting_tool_history_v1',
+  'betting_bankroll_v1',
+  'betting_tool_elo_v1',
+  'betting_tool_clv_v1',
+  'betting_tool_line_history_v1',
+  'betting_tool_today_extra_v1',
+];
+const LAST_BACKUP_KEY = 'betting_tool_last_backup_v1';
+const BACKUP_REMINDER_HOURS = 4;
+
+function exportFullBackup() {
+  const backup = { _meta: { exportedAt: new Date().toISOString(), version: 1 }, data: {} };
+  BACKUP_KEYS.forEach(function(key) {
+    const raw = localStorage.getItem(key);
+    if (raw != null) backup.data[key] = raw;
+  });
+  const blob = new Blob([JSON.stringify(backup, null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'betting-tool-backup-' + new Date().toISOString().slice(0,10) + '.json';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+  try { localStorage.setItem(LAST_BACKUP_KEY, new Date().toISOString()); } catch(e) {}
+  const banner = document.getElementById('backup-reminder-banner');
+  if (banner) banner.remove();
+  showToast('Respaldo descargado (' + Object.keys(backup.data).length + ' de ' + BACKUP_KEYS.length + ' secciones con datos)', 'success', 4000);
+}
+
+function triggerImportBackup() {
+  const input = document.createElement('input');
+  input.type = 'file';
+  input.accept = '.json,application/json';
+  input.onchange = function(e) {
+    const file = e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = function(ev) {
+      try {
+        const backup = JSON.parse(ev.target.result);
+        if (!backup || !backup.data) { showToast('Archivo de respaldo invalido', 'warning'); return; }
+        let restored = 0;
+        BACKUP_KEYS.forEach(function(key) {
+          if (backup.data[key] != null) {
+            localStorage.setItem(key, backup.data[key]);
+            restored++;
+          }
+        });
+        showToast('Respaldo restaurado (' + restored + ' seccion(es)). Recargando...', 'success', 3000);
+        setTimeout(function(){ location.reload(); }, 1500);
+      } catch(err) {
+        showToast('Error leyendo el archivo: ' + err.message, 'error', 5000);
+      }
+    };
+    reader.readAsText(file);
+  };
+  input.click();
+}
+
+function checkBackupReminder() {
+  let lastBackup = null;
+  try { lastBackup = localStorage.getItem(LAST_BACKUP_KEY); } catch(e) {}
+  const hoursSince = lastBackup ? (Date.now() - new Date(lastBackup).getTime()) / (60*60*1000) : Infinity;
+  if (hoursSince < BACKUP_REMINDER_HOURS) return;
+  const label = lastBackup ? 'Han pasado ' + Math.floor(hoursSince) + ' horas desde tu ultimo respaldo.' : 'Todavia no has hecho ningun respaldo.';
+  const banner = document.createElement('div');
+  banner.id = 'backup-reminder-banner';
+  banner.style.cssText = 'position:fixed;bottom:0;left:0;right:0;background:#1a1a1a;color:#fff;padding:12px 16px;display:flex;align-items:center;justify-content:space-between;gap:10px;z-index:99999;font-size:13px;';
+  banner.innerHTML = '<span>💾 ' + label + '</span>'
+    + '<div style="display:flex;gap:6px;flex-shrink:0;">'
+    + '<button id="backup-reminder-dismiss" style="background:transparent;color:#ccc;border:1px solid #555;border-radius:6px;padding:7px 10px;font-size:12px;cursor:pointer;">Ahora no</button>'
+    + '<button id="backup-reminder-go" style="background:#fff;color:#1a1a1a;border:none;border-radius:6px;padding:7px 12px;font-size:12px;font-weight:600;cursor:pointer;">Respaldar</button>'
+    + '</div>';
+  document.body.appendChild(banner);
+  document.getElementById('backup-reminder-dismiss').onclick = function(){ banner.remove(); };
+  document.getElementById('backup-reminder-go').onclick = function(){ exportFullBackup(); };
+}
+
+function renderLastBackupLabel() {
+  const el = document.getElementById('last-backup-label');
+  if (!el) return;
+  let lastBackup = null;
+  try { lastBackup = localStorage.getItem(LAST_BACKUP_KEY); } catch(e) {}
+  if (!lastBackup) { el.textContent = 'Nunca has hecho un respaldo.'; return; }
+  const hours = (Date.now() - new Date(lastBackup).getTime()) / (60*60*1000);
+  el.textContent = 'Ultimo respaldo: hace ' + (hours < 1 ? 'menos de 1 hora' : Math.floor(hours) + ' hora(s)');
 }
 
 // ── RESTAURAR HISTORIAL DESDE LA NUBE ───────────────────────────────────────
@@ -5828,6 +5929,9 @@ document.addEventListener('DOMContentLoaded', function() {
       if (inp) inp.value = savedProxy;
     }
   } catch(e) {}
+
+  checkBackupReminder();
+  renderLastBackupLabel();
 
   var tab = 'config';
   try { tab = sessionStorage.getItem('_tab') || 'config'; } catch(e) {}
