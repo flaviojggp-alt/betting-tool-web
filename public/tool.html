@@ -344,6 +344,29 @@ function getUnidentifiedMatches() {
   return Object.values(byMatch).sort(function(a,b){ return b.count - a.count; });
 }
 
+// Sincroniza la liga asignada manualmente hacia Supabase (PATCH a todas las
+// filas de ese partido, sin importar el mercado) -- para que el trabajo de
+// identificar ligas no se pierda si se borra el localStorage otra vez.
+// Requiere que la columna 'league' exista en la tabla bets (ver SQL abajo).
+async function syncLeagueToCloud(matchName, leagueKey) {
+  if (!_sb || !_sbUser) return;
+  try {
+    const { data: sessionData } = await _sb.auth.getSession();
+    const token = sessionData?.session?.access_token;
+    if (!token) return;
+    await fetch(SUPABASE_URL + '/rest/v1/bets?user_id=eq.' + _sbUser.id + '&match=eq.' + encodeURIComponent(matchName), {
+      method: 'PATCH',
+      headers: {
+        'Content-Type': 'application/json',
+        'apikey': SUPABASE_KEY,
+        'Authorization': 'Bearer ' + token,
+        'Prefer': 'return=minimal',
+      },
+      body: JSON.stringify({ league: leagueKey }),
+    });
+  } catch(e) { console.warn('Sync liga a nube fallo:', e.message); }
+}
+
 function assignLeagueToMatch(matchName, leagueKey) {
   if (!leagueKey) return;
   const h = getHistory();
@@ -352,6 +375,7 @@ function assignLeagueToMatch(matchName, leagueKey) {
     if (b.match === matchName && !b.league) { b.league = leagueKey; updated++; }
   });
   saveHistory(h);
+  syncLeagueToCloud(matchName, leagueKey);
   return updated;
 }
 
@@ -515,6 +539,7 @@ async function saveBetToCloud(bet) {
         amount: parseFloat(bet.amount) || 0,
         result: bet.result || 'pending',
         created_at: bet.date || new Date().toISOString(),
+        league: bet.league || null,
       })
     });
     if (!res.ok) console.warn('Cloud save failed:', res.status);
@@ -615,7 +640,7 @@ async function restoreHistoryFromCloud() {
         confidence: cb.confidence,
         amount: cb.amount,
         result: cb.result,
-        league: null, // Supabase no guardaba este campo todavia en esas fechas
+        league: cb.league || null, // ahora Supabase SI guarda esto -- fallback a null para registros viejos
       });
       localKeys.add(key);
       restored++;
@@ -3690,6 +3715,11 @@ function calcBets(m){
         b.factors = (b.factors || '') + (feedbackAdj > 0 ? ' +Hist' : ' -Hist');
       }
     }
+    // BUGFIX: el redondeo antes solo pasaba si feedbackAdj != 0 -- si no habia
+    // ajuste historico aplicable, el numero decimal crudo de la formula
+    // original (ej. BTTS dando "56.33333333333333%") pasaba directo a la
+    // pantalla sin redondear. Ahora se redondea siempre.
+    b.confidence = Math.round(b.confidence);
   });
   const activeBets = bets.filter(function(b){ return !shouldBlockBet(b, m.league); });
   m.blockedBets = bets.filter(function(b){ return shouldBlockBet(b, m.league); }).map(function(b){ return { market: b.market, confidence: b.confidence }; });
