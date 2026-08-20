@@ -1475,7 +1475,7 @@ function showManualBetModal() {
   };
 }
 
-function placeBet(match, market, odds, confidence, amount, fixtureId, league){
+function placeBet(match, market, odds, confidence, amount, fixtureId, league, modelVersion){
   const bk = getBK();
 
   // Validaciones
@@ -1496,6 +1496,7 @@ function placeBet(match, market, odds, confidence, amount, fixtureId, league){
     bookmaker: bk.settings.bookmaker,
     fixtureId: fixtureId || null, // usado para verificacion automatica de resultados
     league: league || null,
+    modelVersion: modelVersion || null,
   };
 
   bk.current = +(bk.current - amount).toFixed(2);
@@ -1504,7 +1505,7 @@ function placeBet(match, market, odds, confidence, amount, fixtureId, league){
   syncBankrollTxToCloud(tx);
 
   // También registrar en historial de apuestas
-  recordBet({match, market, odds, confidence, league, amount}, sharedId);
+  recordBet({match, market, odds, confidence, league, amount, modelVersion}, sharedId);
 
   return { ok:true, tx, remaining: getRemainingBetsToday(bk) };
 }
@@ -2190,6 +2191,7 @@ function handleBetClick(btn){
   const defaultAmt = parseFloat(btn.getAttribute('data-default'));
   const fixtureId = btn.getAttribute('data-fixture-id') || null;
   const league = btn.getAttribute('data-league') || null;
+  const modelVersion = btn.getAttribute('data-model-version') || null;
 
   const inp = document.getElementById(safeId);
   const amt = inp ? parseFloat(inp.value)||defaultAmt : defaultAmt;
@@ -2202,7 +2204,7 @@ function handleBetClick(btn){
     return;
   }
 
-  const res = placeBet(match, market, odds, confidence, amt, fixtureId, league);
+  const res = placeBet(match, market, odds, confidence, amt, fixtureId, league, modelVersion);
 
   if(res.ok){
     btn.style.background = '#3B6D11';
@@ -2436,6 +2438,7 @@ function buildKellyEVPanel(bet, matchLabel, matchData, siblingRank){
         data-default="${adjustedAmount.toFixed(2)}"
         data-fixture-id="${matchData?.fixtureId||''}"
         data-league="${matchData?.league||''}"
+        data-model-version="${bet.modelVersion||''}"
         onclick="handleBetClick(this)"
         style="flex:1;font-size:12px;font-weight:600;background:#1a1a1a;color:#fff;border:none;border-radius:6px;padding:6px 10px;cursor:pointer;">
         💰 Apostar <span class="bet-btn-label">${adjustedAmount.toFixed(2)}</span>
