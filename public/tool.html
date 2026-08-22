@@ -3861,10 +3861,23 @@ function calcBets(m){
   // varias median la MISMA señal subyacente dos o tres veces. Ahora se
   // combinan las fuentes disponibles como PROBABILIDADES reales, ponderadas
   // por confiabilidad -- mismo principio que ya usa goles.
+  // Tasa de empate tipica en futbol -- usada para corregir el sesgo del ELO
+  // (ver mas abajo).
+  const TYPICAL_DRAW_RATE = 0.26;
+
   function blendVictoryProbability(isHome) {
     const sources = [];
     if (eloHasData) {
-      sources.push({ prob: isHome ? elo.homeProb : elo.awayProb, weight: 3 });
+      // BUGFIX: eloWinProb() devuelve el PUNTAJE ESPERADO (donde un empate
+      // cuenta 0.5, convencion heredada del ajedrez -- ver updateElo/
+      // seedEloFromH2H), NO la probabilidad pura de ganar. En futbol, ~26%
+      // de los partidos terminan en empate, asi que usar el puntaje esperado
+      // directo como "probabilidad de ganar" sobreestima sistematicamente.
+      // Se comprime la señal hacia 0.5 proporcional a la tasa de empate
+      // tipica antes de usarla en la mezcla.
+      const rawElo = isHome ? elo.homeProb : elo.awayProb;
+      const eloProbAdjusted = 0.5 + (rawElo - 0.5) * (1 - TYPICAL_DRAW_RATE);
+      sources.push({ prob: eloProbAdjusted, weight: 3 });
     }
     if (h2h && h2h.sampleSize >= 3) {
       const p = isHome ? h2h.homeWinRate : h2h.awayWinRate;
@@ -3889,23 +3902,33 @@ function calcBets(m){
     return { prob: blended, n: sources.length };
   }
 
+  // MEJORA: victoria nunca incorporaba estadio neutral, rotacion/fatiga, ni
+  // disponibilidad de jugadores clave -- señales ya conectadas en
+  // goles/tarjetas, pero ausentes de victoria (ni en las formulas viejas ni
+  // en el blend nuevo hasta ahora). Se agregan como nudges chicos, igual en
+  // espiritu a necVictAdj/rivalQualityAdj. Magnitudes conservadoras en esta
+  // primera version -- se pueden afinar despues con datos reales.
+  const neutralVenueProbNudge = isNeutralVenue ? -0.05 : 0;
+  const fatigueProbNudge = ((hFat?.adjustments?.confidence||0) - (aFat?.adjustments?.confidence||0)) * 0.003;
+  const keyPlayerProbNudge = ((hKeyPlaying?hKeyImpact:0) - (aKeyPlaying?aKeyImpact:0)) * 0.03;
+
   const homeBlend = blendVictoryProbability(true);
   if (homeBlend && m.odds.h <= 2.20) {
-    let adjProb = homeBlend.prob + (necVictAdj/100)*0.4 + (rivalQualityAdj/100)*0.4;
+    let adjProb = homeBlend.prob + (necVictAdj/100)*0.4 + (rivalQualityAdj/100)*0.4 + neutralVenueProbNudge + fatigueProbNudge + keyPlayerProbNudge;
     adjProb = Math.min(0.90, Math.max(0.35, adjProb));
     const conf = Math.round(adjProb*100);
     bets.push({market:`Victoria ${m.home.name}`,odds:m.odds.h,confidence:conf,
-      factors:'Blend('+homeBlend.n+')'+necTag+tramiteTag+eloTag, modelVersion:'v2-blend',
-      reason:`Probabilidad combinada de ${homeBlend.n} fuente(s) (ELO+H2H+API+dominio): ${conf}%${necNote}${eloNote}${impNote}`});
+      factors:'Blend('+homeBlend.n+')'+necTag+tramiteTag+eloTag+(isNeutralVenue?' +Neutral':'')+playerTag, modelVersion:'v2-blend',
+      reason:`Probabilidad combinada de ${homeBlend.n} fuente(s) (ELO+H2H+API+dominio): ${conf}%${necNote}${eloNote}${impNote}${isNeutralVenue?' · estadio neutral':''}${playerNote}`});
   }
   const awayBlend = blendVictoryProbability(false);
   if (awayBlend && m.odds.a <= 2.20) {
-    let adjProb = awayBlend.prob - (necVictAdj/100)*0.4;
+    let adjProb = awayBlend.prob - (necVictAdj/100)*0.4 - neutralVenueProbNudge - fatigueProbNudge - keyPlayerProbNudge;
     adjProb = Math.min(0.90, Math.max(0.35, adjProb));
     const conf = Math.round(adjProb*100);
     bets.push({market:`Victoria ${m.away.name}`,odds:m.odds.a,confidence:conf,
-      factors:'Blend('+awayBlend.n+')'+necTag+tramiteTag+eloTag, modelVersion:'v2-blend',
-      reason:`Probabilidad combinada de ${awayBlend.n} fuente(s) (ELO+H2H+API+dominio): ${conf}%${necNote}`});
+      factors:'Blend('+awayBlend.n+')'+necTag+tramiteTag+eloTag+(isNeutralVenue?' +Neutral':'')+playerTag, modelVersion:'v2-blend',
+      reason:`Probabilidad combinada de ${awayBlend.n} fuente(s) (ELO+H2H+API+dominio): ${conf}%${necNote}${isNeutralVenue?' · estadio neutral':''}${playerNote}`});
   }
 
   // ── DETECCION AUTOMATICA DE VALUE BETS ──────────────────────────────────
