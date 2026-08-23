@@ -3607,10 +3607,33 @@ function calcBets(m){
   else bets.push({market:'Partido con -6 atajadas',odds:1.65,confidence:Math.min(80,54+(3.5-av)*4),factors:'SVS'+ctxTag,reason:`Pocas atajadas esperadas: ${av.toFixed(1)}/pj`});
 
   // ── 6. DELANTEROS / BTTS ──
-  const bttsConf = poisBTTSConf !== null
-    ? Math.round(poisBTTSConf*0.5 + (58+(af2-2.5)*4+bB)*0.5)
-    : Math.min(90, 58+(af2-2.5)*4+bB);
-  if(af2>=2.5&&ag>=2.0) bets.push({market:'Ambos equipos marcan',odds:1.85,confidence:Math.min(92,Math.max(35,bttsConf+(h2h&&h2h.bttsRate>=0.6?8:h2h&&h2h.bttsRate>=0.5?4:0)+(poisBTTSConf&&poisBTTSConf>55?5:0)+dixonColesAdj.btts)),factors:'FWD'+h2hTag+hvTag+poisTag+playerTag+injTag,reason:`Delanteros: ${af2.toFixed(1)} rem/pj${h2h?` · BTTS H2H:${Math.round(h2h.bttsRate*100)}%`:''}${poisBTTSConf?` · Poisson: ${poisBTTSConf}%`:''}${playerNote}`});
+  // MEJORA ESTRUCTURAL: antes poisBTTSConf (probabilidad REAL de Poisson) se
+  // mezclaba 50/50 en bttsConf, pero luego se sumaba OTRA VEZ como bono de
+  // +5 si poisBTTSConf>55 -- contando la misma señal dos veces. Ahora es una
+  // sola mezcla limpia por probabilidades, sin doble conteo.
+  function blendBTTSProbability() {
+    const sources = [];
+    if (poisBTTSConf !== null) {
+      sources.push({ prob: poisBTTSConf/100, weight: 3 });
+    }
+    if (h2h && h2h.sampleSize >= 3) {
+      sources.push({ prob: h2h.bttsRate, weight: Math.min(3, h2h.sampleSize * 0.4) });
+    }
+    const shotsSignal = Math.min(0.85, Math.max(0.25, 0.4 + (af2-2.0)*0.08));
+    sources.push({ prob: shotsSignal, weight: 1 });
+    if (!sources.length) return null;
+    const totalWeight = sources.reduce(function(s,x){ return s+x.weight; }, 0);
+    const blended = sources.reduce(function(s,x){ return s+x.prob*x.weight; }, 0) / totalWeight;
+    return blended;
+  }
+  const bttsBlend = blendBTTSProbability();
+  if (bttsBlend != null && af2>=2.0 && ag>=1.8) {
+    const bttsAdjProb = Math.min(0.92, Math.max(0.35, bttsBlend + (dixonColesAdj.btts||0)/100));
+    const bttsConfFinal = Math.round(bttsAdjProb*100);
+    bets.push({market:'Ambos equipos marcan',odds:1.85,confidence:bttsConfFinal,
+      factors:'FWD-Blend'+h2hTag+hvTag+poisTag+playerTag+injTag, modelVersion:'v2-blend',
+      reason:`Probabilidad combinada (Poisson+H2H+ataque): ${bttsConfFinal}%${h2h?` · BTTS H2H:${Math.round(h2h.bttsRate*100)}%`:''}${poisBTTSConf?` · Poisson: ${poisBTTSConf}%`:''}${playerNote}`});
+  }
 
   // ── MERCADO DE GOLEADOR INDIVIDUAL ──────────────────────────────────────
   const hScorersData = m.homeScorers?.players || [];
@@ -3960,6 +3983,21 @@ function calcBets(m){
     });
   }
 
+  // MEJORA: candado de confianza cuando la muestra de estadisticas base de
+  // cualquiera de los 2 equipos es escasa. Antes un partido con muy pocos
+  // datos (ej. n=6) podia generar la misma confianza "normal" que uno con
+  // historial completo -- vimos esto en vivo con partidos internacionales
+  // que daban predicciones identicas por falta de señal real. Shrinkage
+  // suave (igual principio que getDynamicCap): satura en n=15 (ya no
+  // restringe), con un techo conservador de 68% cuando la muestra es minima.
+  function getSampleSizeConfidenceCap(sampleSize) {
+    const conservativeCap = 68, fullCap = 96, saturationPoint = 15;
+    const t = Math.min(1, Math.max(0, sampleSize / saturationPoint));
+    return conservativeCap + (fullCap - conservativeCap) * t;
+  }
+  const minTeamSample = Math.min(hSampleSize||0, aSampleSize||0);
+  const sampleConfCap = getSampleSizeConfidenceCap(minTeamSample);
+
   // Aplicar retroalimentacion automatica de 5 niveles
   const leagueKey = m.league || '';
   bets.forEach(function(b) {
@@ -3976,6 +4014,11 @@ function calcBets(m){
     // original (ej. BTTS dando "56.33333333333333%") pasaba directo a la
     // pantalla sin redondear. Ahora se redondea siempre.
     b.confidence = Math.round(b.confidence);
+    // Aplicar el candado de muestra insuficiente como ultimo paso.
+    if (b.confidence > sampleConfCap) {
+      b.confidence = Math.round(sampleConfCap);
+      b.factors = (b.factors || '') + ' ⚠muestra-chica';
+    }
   });
   const activeBets = bets.filter(function(b){ return !shouldBlockBet(b, m.league); });
   m.blockedBets = bets.filter(function(b){ return shouldBlockBet(b, m.league); }).map(function(b){ return { market: b.market, confidence: b.confidence }; });
@@ -4129,11 +4172,16 @@ function seedEloFromH2H(homeId, awayId, h2hMatches) {
 // parametrizables porque el Nivel 1 (global) y el Nivel 2 (por mercado)
 // acumulan muestra a ritmos muy distintos -- una categoria de mercado rara
 // vez llega a los mismos volumenes que el total general.
+// MEJORA: antes saltaba entre 3 categorias fijas (n<50, n<100, n>=100) --
+// un cambio de una sola apuesta (n=49 a n=50) podia disparar el tope +40% de
+// golpe. Ahora interpola suavemente entre baseCap y maxCap segun donde caiga
+// n dentro del rango de umbrales, sin saltos bruscos en la frontera.
 function getDynamicCap(n, baseCap, maxCap, thresholds) {
   thresholds = thresholds || [50, 100];
-  if (n < thresholds[0]) return baseCap;
-  if (n < thresholds[1]) return Math.round(baseCap * 1.4);
-  return maxCap;
+  if (n <= thresholds[0]) return baseCap;
+  if (n >= thresholds[1]) return maxCap;
+  const t = (n - thresholds[0]) / (thresholds[1] - thresholds[0]);
+  return Math.round(baseCap + (maxCap - baseCap) * t);
 }
 
 function getCalibrationAdj() {
@@ -4385,6 +4433,32 @@ function getFactorCorrelations() {
   });
 
   return correlations;
+}
+
+// Version detallada de getFactorCorrelations -- expone el lift crudo, tamaño
+// de muestra, y una recomendacion explicita por factor.
+function getFactorRecommendations() {
+  const h = getHistory().filter(function(b){ return b.result !== 'pending' && b.factors; });
+  if (h.length < 25) return [];
+  const factorTags = ['H2H', 'Pred', 'xG', 'Elo', 'Nec', 'DOM', 'COR', 'CARDS', 'Pois', 'Ctx', 'Def', 'Blend', 'Neutral', 'Jug'];
+  const results = [];
+  factorTags.forEach(function(tag) {
+    const withTag = h.filter(function(b){ return (b.factors||'').includes(tag); });
+    const withoutTag = h.filter(function(b){ return !(b.factors||'').includes(tag); });
+    if (withTag.length < 8 || withoutTag.length < 8) return;
+    const rateWith = withTag.filter(function(b){ return b.result==='win'; }).length / withTag.length;
+    const rateWithout = withoutTag.filter(function(b){ return b.result==='win'; }).length / withoutTag.length;
+    const lift = rateWith - rateWithout;
+    let recommendation = 'neutral';
+    if (withTag.length >= 20 && lift <= -0.08) recommendation = 'considerar_remover';
+    else if (withTag.length >= 20 && lift >= 0.08) recommendation = 'funciona_bien';
+    results.push({
+      tag: tag, n: withTag.length, liftPct: Math.round(lift*100),
+      rateWithPct: Math.round(rateWith*100), rateWithoutPct: Math.round(rateWithout*100),
+      recommendation: recommendation,
+    });
+  });
+  return results.sort(function(a,b){ return a.liftPct - b.liftPct; });
 }
 
 // ── NIVEL 5: Cruce mercado x liga ────────────────────────────────────────────
@@ -5629,6 +5703,17 @@ function renderProAnalysis() {
         html += '<span style="background:' + bg + ';color:' + clr + ';font-size:12px;padding:3px 10px;border-radius:12px;font-weight:500;">' + e[0] + ': ' + (e[1]>=0?'↑':'↓') + Math.abs(e[1]) + ' pts</span>';
       });
       html += '</div><p style="font-size:11px;color:#999;margin-top:4px;">↑ mejoran tus aciertos historicamente, ↓ los empeoran.</p>';
+    }
+    var factorRecs = getFactorRecommendations().filter(function(r){ return r.recommendation === 'considerar_remover'; });
+    if (factorRecs.length > 0) {
+      html += '<p style="font-size:12px;font-weight:500;color:#A32D2D;margin-top:10px;margin-bottom:6px;">⚠️ Factores a considerar revisar/quitar (evidencia suficiente):</p>';
+      factorRecs.forEach(function(r) {
+        html += '<div style="background:#FCEBEB;border-radius:6px;padding:6px 10px;margin-bottom:4px;font-size:11px;">'
+          + '<b>' + r.tag + '</b> -- con este factor: ' + r.rateWithPct + '% acierto (n=' + r.n + ') vs sin el: ' + r.rateWithoutPct + '% acierto ('
+          + (r.liftPct>=0?'+':'') + r.liftPct + ' pts de diferencia)'
+          + '</div>';
+      });
+      html += '<p style="font-size:10px;color:#999;margin-bottom:8px;">Esto es evidencia, no una orden -- antes de quitar un factor, confirma que la muestra sin el tambien sea razonable y no este sesgada por otra variable.</p>';
     }
     html += '</div>';
   }
