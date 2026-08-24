@@ -240,8 +240,10 @@ input[type=range] { flex: 1; accent-color: #1a1a1a; height: 4px; }
   <!-- RESULTADOS -->
   <div id="tab-history" style="display:none;">
     <div id="history-stats" style="margin-bottom:1rem;"></div>
-    <p class="section-label">Jugadas registradas</p>
-    <div id="history-list"></div>
+    <details style="margin-bottom:1rem;">
+      <summary class="section-label" style="cursor:pointer;">Jugadas registradas (ver lista completa)</summary>
+      <div id="history-list" style="margin-top:8px;"></div>
+    </details>
     <div style="margin-top:1rem;display:flex;gap:8px;">
       <button class="btn-sec" onclick="showConfirm('Borrar todo el historial de jugadas?', function(){ localStorage.removeItem('betting_tool_history_v1'); renderHistory(); showToast('Historial borrado', 'success'); });">Borrar historial</button>
     </div>
@@ -2302,11 +2304,11 @@ function renderHistory(){
     ${leaguePanel}
     <div style="background:#fff;border:1px solid #e5e5e5;border-radius:10px;padding:12px;margin-top:10px;">
       <p style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:0.06em;margin-bottom:8px;">Evolucion del ROI acumulado</p>
-      <canvas id="roi-chart" height="80" style="width:100%;display:block;"></canvas>
+      <canvas id="roi-chart" height="150" style="width:100%;display:block;"></canvas></canvas>
     </div>
     <div style="background:#fff;border:1px solid #e5e5e5;border-radius:10px;padding:12px;margin-top:10px;">
       <p style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:0.06em;margin-bottom:8px;">ROI y % acierto por dia (ultimos 30 dias con actividad)</p>
-      <canvas id="daily-chart" height="110" style="width:100%;display:block;"></canvas>
+      <canvas id="daily-chart" height="190" style="width:100%;display:block;"></canvas></canvas>
     </div>
     <div style="background:#fff;border:1px solid #e5e5e5;border-radius:10px;padding:12px;margin-top:10px;">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
@@ -2326,7 +2328,7 @@ function renderHistory(){
         </select>
       </div>
       <p id="league-evo-msg" style="font-size:12px;color:#999;text-align:center;padding:8px 0;"></p>
-      <canvas id="league-evo-chart" height="80" style="width:100%;display:block;"></canvas>
+      <canvas id="league-evo-chart" height="150" style="width:100%;display:block;"></canvas></canvas>
     </div>`;
     setTimeout(function(){
       drawROIChart(filteredHistory);
@@ -5358,23 +5360,32 @@ function drawROIChart(historyOverride) {
     return;
   }
   var W = canvas.offsetWidth || 700;
-  canvas.width = W; canvas.height = 80;
+  var H = 150;
+  canvas.width = W; canvas.height = H;
   var ctx = canvas.getContext('2d');
   var cum = 0;
   var pts = h.map(function(b, i) {
     cum += b.result === 'win' ? (b.odds - 1) * 100 : -100;
-    return { x: i, y: parseFloat((cum / (i + 1)).toFixed(1)) };
+    return { x: i, y: parseFloat((cum / (i + 1)).toFixed(1)), date: b.date };
   });
   var ys = pts.map(function(p){ return p.y; });
   var minY = Math.min.apply(null, [0].concat(ys));
   var maxY = Math.max.apply(null, [0].concat(ys));
   var range = maxY - minY || 1;
-  var pad = 12;
-  var toX = function(i){ return pad + (i / (pts.length - 1 || 1)) * (W - pad * 2); };
-  var toY = function(v){ return 80 - pad - (v - minY) / range * (80 - pad * 2); };
+  var padL = 40, padR = 14, padT = 16, padB = 20;
+  var toX = function(i){ return padL + (i / (pts.length - 1 || 1)) * (W - padL - padR); };
+  var toY = function(v){ return H - padB - (v - minY) / range * (H - padT - padB); };
   var lastClr = pts[pts.length-1].y >= 0 ? '#3B6D11' : '#A32D2D';
+  var fmtDate = function(d){ return new Date(d).toLocaleDateString('es', {day:'2-digit', month:'short'}); };
+
+  // Etiquetas del eje Y: maximo, cero (si aplica) y minimo
+  ctx.font = '10px sans-serif'; ctx.fillStyle = '#999'; ctx.textAlign = 'right';
+  ctx.fillText(maxY.toFixed(0) + '%', padL - 6, toY(maxY) + 3);
+  ctx.fillText(minY.toFixed(0) + '%', padL - 6, toY(minY) + 3);
+  if (minY < -2 && maxY > 2) ctx.fillText('0%', padL - 6, toY(0) + 3);
+
   ctx.strokeStyle = '#e0e0e0'; ctx.lineWidth = 1; ctx.setLineDash([4,3]);
-  ctx.beginPath(); ctx.moveTo(pad, toY(0)); ctx.lineTo(W - pad, toY(0)); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(padL, toY(0)); ctx.lineTo(W - padR, toY(0)); ctx.stroke();
   ctx.setLineDash([]);
   ctx.beginPath(); ctx.moveTo(toX(0), toY(pts[0].y));
   pts.forEach(function(p){ ctx.lineTo(toX(p.x), toY(p.y)); });
@@ -5384,8 +5395,13 @@ function drawROIChart(historyOverride) {
   ctx.beginPath(); ctx.strokeStyle = lastClr; ctx.lineWidth = 2;
   pts.forEach(function(p, i){ if(i===0) ctx.moveTo(toX(p.x),toY(p.y)); else ctx.lineTo(toX(p.x),toY(p.y)); });
   ctx.stroke();
-  ctx.font = '10px sans-serif'; ctx.fillStyle = lastClr; ctx.textAlign = 'right';
-  ctx.fillText(pts[pts.length-1].y + '%', toX(pts.length-1) - 2, toY(pts[pts.length-1].y) - 3);
+  ctx.font = 'bold 12px sans-serif'; ctx.fillStyle = lastClr; ctx.textAlign = 'right';
+  ctx.fillText(pts[pts.length-1].y + '%', toX(pts.length-1) - 2, toY(pts[pts.length-1].y) - 6);
+
+  // Fechas de inicio y fin en el eje X
+  ctx.font = '10px sans-serif'; ctx.fillStyle = '#999';
+  ctx.textAlign = 'left'; ctx.fillText(fmtDate(pts[0].date), padL, H - 4);
+  ctx.textAlign = 'right'; ctx.fillText(fmtDate(pts[pts.length-1].date), W - padR, H - 4);
 }
 
 // ── GRAFICO: ROI Y % ACIERTO POR DIA ────────────────────────────────────────
@@ -5404,38 +5420,63 @@ function drawDailyChart(historyOverride) {
     canvas.parentNode.replaceChild(p, canvas);
     return;
   }
-  const W = canvas.offsetWidth || 700, H = 110;
+  const W = canvas.offsetWidth || 700, H = 190;
   canvas.width = W; canvas.height = H;
   const ctx = canvas.getContext('2d');
-  const pad = 14;
+  const padL = 40, padR = 10, padT = 16, padB = 26;
+  const plotH = H - padT - padB;
   const roiVals = daily.map(function(d){ return d.roi; });
   const maxAbsRoi = Math.max(20, Math.max.apply(null, roiVals.map(Math.abs)));
-  const barW = (W - pad*2) / daily.length;
-  const zeroY = H/2;
-  const roiToY = function(v){ return zeroY - (v/maxAbsRoi) * (H/2 - pad); };
-  const winRateToY = function(v){ return H - pad - (v/100) * (H - pad*2); };
-  // Linea cero
+  const barW = (W - padL - padR) / daily.length;
+  const zeroY = padT + plotH/2;
+  const roiToY = function(v){ return zeroY - (v/maxAbsRoi) * (plotH/2); };
+  const winRateToY = function(v){ return padT + plotH - (v/100) * plotH; };
+
+  // Etiquetas del eje Y: rango de ROI diario
+  ctx.font = '10px sans-serif'; ctx.fillStyle = '#999'; ctx.textAlign = 'right';
+  ctx.fillText('+' + maxAbsRoi.toFixed(0) + '%', padL - 6, roiToY(maxAbsRoi) + 3);
+  ctx.fillText('-' + maxAbsRoi.toFixed(0) + '%', padL - 6, roiToY(-maxAbsRoi) + 3);
+  ctx.fillText('0%', padL - 6, zeroY + 3);
+
   ctx.strokeStyle = '#e0e0e0'; ctx.lineWidth = 1;
-  ctx.beginPath(); ctx.moveTo(pad, zeroY); ctx.lineTo(W-pad, zeroY); ctx.stroke();
-  // Barras de ROI diario
+  ctx.beginPath(); ctx.moveTo(padL, zeroY); ctx.lineTo(W-padR, zeroY); ctx.stroke();
+
   daily.forEach(function(d, i) {
-    const x = pad + i*barW + barW*0.15;
+    const x = padL + i*barW + barW*0.15;
     const w = barW*0.7;
     const y = roiToY(Math.max(0,d.roi));
     const y0 = roiToY(Math.min(0,d.roi));
     ctx.fillStyle = d.roi >= 0 ? 'rgba(59,109,17,.55)' : 'rgba(163,45,45,.55)';
     ctx.fillRect(x, Math.min(y,y0), w, Math.max(1,Math.abs(y0-y)));
   });
-  // Linea de % acierto superpuesta
+
   ctx.beginPath(); ctx.strokeStyle = '#185FA5'; ctx.lineWidth = 2;
   daily.forEach(function(d, i) {
-    const x = pad + i*barW + barW*0.5;
+    const x = padL + i*barW + barW*0.5;
     const y = winRateToY(d.winRate);
     if (i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y);
   });
   ctx.stroke();
+
+  // Valor del ultimo dia (% acierto) destacado
+  const lastPt = daily[daily.length-1];
+  ctx.font = 'bold 10px sans-serif'; ctx.fillStyle = '#185FA5'; ctx.textAlign = 'right';
+  ctx.fillText(lastPt.winRate + '%', W - padR, winRateToY(lastPt.winRate) - 5);
+
+  // Fechas en el eje X -- subconjunto (max ~6 etiquetas) para no saturar,
+  // siempre incluyendo el primer y ultimo dia.
+  const labelStep = Math.max(1, Math.ceil(daily.length / 6));
+  ctx.font = '9px sans-serif'; ctx.fillStyle = '#999'; ctx.textAlign = 'center';
+  daily.forEach(function(d, i) {
+    if (i % labelStep === 0 || i === daily.length-1) {
+      const x = padL + i*barW + barW*0.5;
+      const label = new Date(d.day + 'T00:00:00').toLocaleDateString('es', {day:'2-digit', month:'short'});
+      ctx.fillText(label, x, H - 8);
+    }
+  });
+
   ctx.font = '9px sans-serif'; ctx.fillStyle = '#999'; ctx.textAlign = 'left';
-  ctx.fillText('barras = ROI del dia · linea azul = % acierto del dia', pad, 10);
+  ctx.fillText('barras = ROI del dia · linea azul = % acierto del dia', padL, 10);
 }
 
 // ── GRAFICO: EVOLUCION DE ROI POR LIGA ──────────────────────────────────────
@@ -5457,23 +5498,31 @@ function drawLeagueEvolutionChart(leagueKey) {
   const msg = document.getElementById('league-evo-msg');
   if (msg) msg.textContent = '';
   const W = canvas.offsetWidth || 700;
-  canvas.width = W; canvas.height = 80;
+  const H = 150;
+  canvas.width = W; canvas.height = H;
   const ctx = canvas.getContext('2d');
   let cum = 0;
   const pts = h.map(function(b, i) {
     cum += b.result === 'win' ? (b.odds - 1) * 100 : -100;
-    return { x: i, y: parseFloat((cum / (i + 1)).toFixed(1)) };
+    return { x: i, y: parseFloat((cum / (i + 1)).toFixed(1)), date: b.date };
   });
   const ys = pts.map(function(p){ return p.y; });
   const minY = Math.min.apply(null, [0].concat(ys));
   const maxY = Math.max.apply(null, [0].concat(ys));
   const range = maxY - minY || 1;
-  const pad = 12;
-  const toX = function(i){ return pad + (i / (pts.length - 1 || 1)) * (W - pad * 2); };
-  const toY = function(v){ return 80 - pad - (v - minY) / range * (80 - pad * 2); };
+  const padL = 40, padR = 14, padT = 16, padB = 20;
+  const toX = function(i){ return padL + (i / (pts.length - 1 || 1)) * (W - padL - padR); };
+  const toY = function(v){ return H - padB - (v - minY) / range * (H - padT - padB); };
   const lastClr = pts[pts.length-1].y >= 0 ? '#3B6D11' : '#A32D2D';
+  const fmtDate = function(d){ return new Date(d).toLocaleDateString('es', {day:'2-digit', month:'short'}); };
+
+  ctx.font = '10px sans-serif'; ctx.fillStyle = '#999'; ctx.textAlign = 'right';
+  ctx.fillText(maxY.toFixed(0) + '%', padL - 6, toY(maxY) + 3);
+  ctx.fillText(minY.toFixed(0) + '%', padL - 6, toY(minY) + 3);
+  if (minY < -2 && maxY > 2) ctx.fillText('0%', padL - 6, toY(0) + 3);
+
   ctx.strokeStyle = '#e0e0e0'; ctx.lineWidth = 1; ctx.setLineDash([4,3]);
-  ctx.beginPath(); ctx.moveTo(pad, toY(0)); ctx.lineTo(W - pad, toY(0)); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(padL, toY(0)); ctx.lineTo(W - padR, toY(0)); ctx.stroke();
   ctx.setLineDash([]);
   ctx.beginPath(); ctx.moveTo(toX(0), toY(pts[0].y));
   pts.forEach(function(p){ ctx.lineTo(toX(p.x), toY(p.y)); });
@@ -5483,8 +5532,12 @@ function drawLeagueEvolutionChart(leagueKey) {
   ctx.beginPath(); ctx.strokeStyle = lastClr; ctx.lineWidth = 2;
   pts.forEach(function(p, i){ if(i===0) ctx.moveTo(toX(p.x),toY(p.y)); else ctx.lineTo(toX(p.x),toY(p.y)); });
   ctx.stroke();
-  ctx.font = '10px sans-serif'; ctx.fillStyle = lastClr; ctx.textAlign = 'right';
-  ctx.fillText(pts[pts.length-1].y + '%', toX(pts.length-1) - 2, toY(pts[pts.length-1].y) - 3);
+  ctx.font = 'bold 12px sans-serif'; ctx.fillStyle = lastClr; ctx.textAlign = 'right';
+  ctx.fillText(pts[pts.length-1].y + '%', toX(pts.length-1) - 2, toY(pts[pts.length-1].y) - 6);
+
+  ctx.font = '10px sans-serif'; ctx.fillStyle = '#999';
+  ctx.textAlign = 'left'; ctx.fillText(fmtDate(pts[0].date), padL, H - 4);
+  ctx.textAlign = 'right'; ctx.fillText(fmtDate(pts[pts.length-1].date), W - padR, H - 4);
 }
 
 function onLeagueEvoChange() {
