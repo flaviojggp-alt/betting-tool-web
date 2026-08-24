@@ -2304,11 +2304,11 @@ function renderHistory(){
     ${leaguePanel}
     <div style="background:#fff;border:1px solid #e5e5e5;border-radius:10px;padding:12px;margin-top:10px;">
       <p style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:0.06em;margin-bottom:8px;">Evolucion del ROI acumulado</p>
-      <canvas id="roi-chart" height="150" style="width:100%;display:block;"></canvas></canvas>
+      <canvas id="roi-chart" height="300" style="width:100%;display:block;"></canvas>
     </div>
     <div style="background:#fff;border:1px solid #e5e5e5;border-radius:10px;padding:12px;margin-top:10px;">
       <p style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:0.06em;margin-bottom:8px;">ROI y % acierto por dia (ultimos 30 dias con actividad)</p>
-      <canvas id="daily-chart" height="190" style="width:100%;display:block;"></canvas></canvas>
+      <canvas id="daily-chart" height="380" style="width:100%;display:block;"></canvas>
     </div>
     <div style="background:#fff;border:1px solid #e5e5e5;border-radius:10px;padding:12px;margin-top:10px;">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
@@ -2328,7 +2328,7 @@ function renderHistory(){
         </select>
       </div>
       <p id="league-evo-msg" style="font-size:12px;color:#999;text-align:center;padding:8px 0;"></p>
-      <canvas id="league-evo-chart" height="150" style="width:100%;display:block;"></canvas></canvas>
+      <canvas id="league-evo-chart" height="300" style="width:100%;display:block;"></canvas>
     </div>`;
     setTimeout(function(){
       drawROIChart(filteredHistory);
@@ -5360,7 +5360,7 @@ function drawROIChart(historyOverride) {
     return;
   }
   var W = canvas.offsetWidth || 700;
-  var H = 150;
+  var H = 300;
   canvas.width = W; canvas.height = H;
   var ctx = canvas.getContext('2d');
   var cum = 0;
@@ -5420,7 +5420,7 @@ function drawDailyChart(historyOverride) {
     canvas.parentNode.replaceChild(p, canvas);
     return;
   }
-  const W = canvas.offsetWidth || 700, H = 190;
+  const W = canvas.offsetWidth || 700, H = 380;
   canvas.width = W; canvas.height = H;
   const ctx = canvas.getContext('2d');
   const padL = 40, padR = 10, padT = 16, padB = 26;
@@ -5498,7 +5498,7 @@ function drawLeagueEvolutionChart(leagueKey) {
   const msg = document.getElementById('league-evo-msg');
   if (msg) msg.textContent = '';
   const W = canvas.offsetWidth || 700;
-  const H = 150;
+  const H = 300;
   canvas.width = W; canvas.height = H;
   const ctx = canvas.getContext('2d');
   let cum = 0;
