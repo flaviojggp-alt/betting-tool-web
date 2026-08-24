@@ -976,6 +976,33 @@ function wilsonInterval(wins, total, z) {
   };
 }
 
+// ── ESTADISTICAS POR DIA ──────────────────────────────────────────────────
+// Agrupa apuestas resueltas por dia calendario -- base para el grafico de
+// "ROI y % acierto por dia", distinto del ROI acumulado que ya existe (ese
+// es una curva continua; esto son valores independientes por dia).
+function getDailyStats(historyOverride) {
+  const h = (historyOverride || getHistory()).filter(function(b){ return b.result !== 'pending'; });
+  const byDay = {};
+  h.forEach(function(b) {
+    const day = new Date(b.date).toISOString().slice(0,10);
+    if (!byDay[day]) byDay[day] = { day: day, total: 0, wins: 0, unitsPnl: 0 };
+    byDay[day].total++;
+    if (b.result === 'win') {
+      byDay[day].wins++;
+      byDay[day].unitsPnl += (b.odds - 1);
+    } else {
+      byDay[day].unitsPnl -= 1;
+    }
+  });
+  return Object.values(byDay).map(function(d) {
+    return {
+      day: d.day, total: d.total,
+      winRate: Math.round(d.wins/d.total*100),
+      roi: +((d.unitsPnl/d.total)*100).toFixed(1),
+    };
+  }).sort(function(a,b){ return a.day.localeCompare(b.day); });
+}
+
 function getStats(historyOverride){
   const full = historyOverride || getHistory();
   const h = full.filter(b=>b.result!=='pending');
@@ -2276,8 +2303,37 @@ function renderHistory(){
     <div style="background:#fff;border:1px solid #e5e5e5;border-radius:10px;padding:12px;margin-top:10px;">
       <p style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:0.06em;margin-bottom:8px;">Evolucion del ROI acumulado</p>
       <canvas id="roi-chart" height="80" style="width:100%;display:block;"></canvas>
+    </div>
+    <div style="background:#fff;border:1px solid #e5e5e5;border-radius:10px;padding:12px;margin-top:10px;">
+      <p style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:0.06em;margin-bottom:8px;">ROI y % acierto por dia (ultimos 30 dias con actividad)</p>
+      <canvas id="daily-chart" height="110" style="width:100%;display:block;"></canvas>
+    </div>
+    <div style="background:#fff;border:1px solid #e5e5e5;border-radius:10px;padding:12px;margin-top:10px;">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+        <p style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:0.06em;margin:0;">Evolucion de ROI por liga</p>
+        <select id="league-evo-select" onchange="onLeagueEvoChange()" style="font-size:11px;padding:4px 6px;border-radius:5px;border:1px solid #ddd;">
+          ${(function(){
+            const leagues = getRoiByLeague(filteredHistory).filter(function(l){ return l.total >= 3; });
+            if (!leagues.length) return '<option value="">Sin datos suficientes</option>';
+            return leagues.map(function(l, i){
+              if (l.league === 'Sin identificar') {
+                return '<option value="__none__"' + (i===0?' selected':'') + '>' + l.league + ' (' + l.total + ')</option>';
+              }
+              const key = filteredHistory.find(function(b){ return getLeagueLabel(b.league) === l.league; })?.league || '';
+              return '<option value="' + key + '"' + (i===0?' selected':'') + '>' + l.league + ' (' + l.total + ')</option>';
+            }).join('');
+          })()}
+        </select>
+      </div>
+      <p id="league-evo-msg" style="font-size:12px;color:#999;text-align:center;padding:8px 0;"></p>
+      <canvas id="league-evo-chart" height="80" style="width:100%;display:block;"></canvas>
     </div>`;
-    setTimeout(function(){ drawROIChart(filteredHistory); }, 80);
+    setTimeout(function(){
+      drawROIChart(filteredHistory);
+      drawDailyChart(filteredHistory);
+      const evoSel = document.getElementById('league-evo-select');
+      if (evoSel && evoSel.value) drawLeagueEvolutionChart(evoSel.value);
+    }, 80);
   }
 
   const list = document.getElementById('history-list');
@@ -5330,6 +5386,110 @@ function drawROIChart(historyOverride) {
   ctx.stroke();
   ctx.font = '10px sans-serif'; ctx.fillStyle = lastClr; ctx.textAlign = 'right';
   ctx.fillText(pts[pts.length-1].y + '%', toX(pts.length-1) - 2, toY(pts[pts.length-1].y) - 3);
+}
+
+// ── GRAFICO: ROI Y % ACIERTO POR DIA ────────────────────────────────────────
+// Barras de ROI por dia (independientes, no acumuladas) + una linea de %
+// acierto superpuesta -- distinto del ROI acumulado, que es una curva
+// continua. Util para ver si dias especificos (ej. mucho volumen, o un dia
+// malo puntual) estan afectando el promedio general.
+function drawDailyChart(historyOverride) {
+  const canvas = document.getElementById('daily-chart');
+  if (!canvas) return;
+  const daily = getDailyStats(historyOverride).slice(-30); // ultimos 30 dias con actividad
+  if (daily.length < 2) {
+    const p = document.createElement('p');
+    p.style.cssText = 'font-size:12px;color:#999;text-align:center;padding:8px 0;';
+    p.textContent = 'Necesitas al menos 2 dias con apuestas resueltas.';
+    canvas.parentNode.replaceChild(p, canvas);
+    return;
+  }
+  const W = canvas.offsetWidth || 700, H = 110;
+  canvas.width = W; canvas.height = H;
+  const ctx = canvas.getContext('2d');
+  const pad = 14;
+  const roiVals = daily.map(function(d){ return d.roi; });
+  const maxAbsRoi = Math.max(20, Math.max.apply(null, roiVals.map(Math.abs)));
+  const barW = (W - pad*2) / daily.length;
+  const zeroY = H/2;
+  const roiToY = function(v){ return zeroY - (v/maxAbsRoi) * (H/2 - pad); };
+  const winRateToY = function(v){ return H - pad - (v/100) * (H - pad*2); };
+  // Linea cero
+  ctx.strokeStyle = '#e0e0e0'; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(pad, zeroY); ctx.lineTo(W-pad, zeroY); ctx.stroke();
+  // Barras de ROI diario
+  daily.forEach(function(d, i) {
+    const x = pad + i*barW + barW*0.15;
+    const w = barW*0.7;
+    const y = roiToY(Math.max(0,d.roi));
+    const y0 = roiToY(Math.min(0,d.roi));
+    ctx.fillStyle = d.roi >= 0 ? 'rgba(59,109,17,.55)' : 'rgba(163,45,45,.55)';
+    ctx.fillRect(x, Math.min(y,y0), w, Math.max(1,Math.abs(y0-y)));
+  });
+  // Linea de % acierto superpuesta
+  ctx.beginPath(); ctx.strokeStyle = '#185FA5'; ctx.lineWidth = 2;
+  daily.forEach(function(d, i) {
+    const x = pad + i*barW + barW*0.5;
+    const y = winRateToY(d.winRate);
+    if (i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y);
+  });
+  ctx.stroke();
+  ctx.font = '9px sans-serif'; ctx.fillStyle = '#999'; ctx.textAlign = 'left';
+  ctx.fillText('barras = ROI del dia · linea azul = % acierto del dia', pad, 10);
+}
+
+// ── GRAFICO: EVOLUCION DE ROI POR LIGA ──────────────────────────────────────
+// Misma curva de ROI acumulado que ya existe, pero filtrada a UNA liga a la
+// vez (elegida en un selector) -- mas simple y legible en mobile que tratar
+// de superponer varias lineas de ligas distintas en un solo grafico.
+function drawLeagueEvolutionChart(leagueKey) {
+  const canvas = document.getElementById('league-evo-chart');
+  if (!canvas) return;
+  const targetKey = leagueKey === '__none__' ? null : leagueKey;
+  const h = getHistory().filter(function(b){ return b.result !== 'pending' && (b.league||null) === targetKey; })
+                         .sort(function(a,b){ return new Date(a.date) - new Date(b.date); });
+  if (h.length < 2) {
+    canvas.getContext('2d').clearRect(0,0,canvas.width,canvas.height);
+    const msg = document.getElementById('league-evo-msg');
+    if (msg) msg.textContent = 'Necesitas al menos 2 apuestas resueltas de esta liga.';
+    return;
+  }
+  const msg = document.getElementById('league-evo-msg');
+  if (msg) msg.textContent = '';
+  const W = canvas.offsetWidth || 700;
+  canvas.width = W; canvas.height = 80;
+  const ctx = canvas.getContext('2d');
+  let cum = 0;
+  const pts = h.map(function(b, i) {
+    cum += b.result === 'win' ? (b.odds - 1) * 100 : -100;
+    return { x: i, y: parseFloat((cum / (i + 1)).toFixed(1)) };
+  });
+  const ys = pts.map(function(p){ return p.y; });
+  const minY = Math.min.apply(null, [0].concat(ys));
+  const maxY = Math.max.apply(null, [0].concat(ys));
+  const range = maxY - minY || 1;
+  const pad = 12;
+  const toX = function(i){ return pad + (i / (pts.length - 1 || 1)) * (W - pad * 2); };
+  const toY = function(v){ return 80 - pad - (v - minY) / range * (80 - pad * 2); };
+  const lastClr = pts[pts.length-1].y >= 0 ? '#3B6D11' : '#A32D2D';
+  ctx.strokeStyle = '#e0e0e0'; ctx.lineWidth = 1; ctx.setLineDash([4,3]);
+  ctx.beginPath(); ctx.moveTo(pad, toY(0)); ctx.lineTo(W - pad, toY(0)); ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.beginPath(); ctx.moveTo(toX(0), toY(pts[0].y));
+  pts.forEach(function(p){ ctx.lineTo(toX(p.x), toY(p.y)); });
+  ctx.lineTo(toX(pts.length-1), toY(0)); ctx.lineTo(toX(0), toY(0)); ctx.closePath();
+  ctx.fillStyle = pts[pts.length-1].y >= 0 ? 'rgba(59,109,17,.12)' : 'rgba(163,45,45,.12)';
+  ctx.fill();
+  ctx.beginPath(); ctx.strokeStyle = lastClr; ctx.lineWidth = 2;
+  pts.forEach(function(p, i){ if(i===0) ctx.moveTo(toX(p.x),toY(p.y)); else ctx.lineTo(toX(p.x),toY(p.y)); });
+  ctx.stroke();
+  ctx.font = '10px sans-serif'; ctx.fillStyle = lastClr; ctx.textAlign = 'right';
+  ctx.fillText(pts[pts.length-1].y + '%', toX(pts.length-1) - 2, toY(pts[pts.length-1].y) - 3);
+}
+
+function onLeagueEvoChange() {
+  const sel = document.getElementById('league-evo-select');
+  if (sel) drawLeagueEvolutionChart(sel.value);
 }
 
 // ── SIMULACION DE PARTIDO COMPLETO ──────────────────────────────────────────
