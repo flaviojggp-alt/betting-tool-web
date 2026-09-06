@@ -940,7 +940,14 @@ function getHistory(){
 function saveHistory(h){ try{ localStorage.setItem(HISTORY_KEY, JSON.stringify(h.slice(-5000))); }catch(e){} }
 function recordBet(bet, sharedId){
   const h = getHistory();
-  const entry = { id: sharedId||Date.now(), date: new Date().toISOString(), match: bet.match, market: bet.market, odds: bet.odds, confidence: bet.confidence, amount: bet.amount||0, result: 'pending', league: bet.league||null };
+  // BUGFIX CRITICO: antes se recibia bet.modelVersion como parametro pero
+  // NUNCA se leia para guardarlo en la entrada -- por eso "v2-blend" nunca
+  // aparecia en el panel de comparacion de modelos, sin importar que tan
+  // bien conectado estuviera el resto de la cadena (boton -> handleBetClick
+  // -> placeBet). Cada apuesta se guardaba SIN esta etiqueta, siempre. Ahora
+  // si se guarda, junto con mlFeatures (señales individuales por apuesta,
+  // para analisis futuro).
+  const entry = { id: sharedId||Date.now(), date: new Date().toISOString(), match: bet.match, market: bet.market, odds: bet.odds, confidence: bet.confidence, amount: bet.amount||0, result: 'pending', league: bet.league||null, modelVersion: bet.modelVersion||null, mlFeatures: bet.mlFeatures||null };
   h.push(entry);
   saveHistory(h);
   saveBetToCloud(entry);
@@ -1504,7 +1511,7 @@ function showManualBetModal() {
   };
 }
 
-function placeBet(match, market, odds, confidence, amount, fixtureId, league, modelVersion){
+function placeBet(match, market, odds, confidence, amount, fixtureId, league, modelVersion, mlFeatures){
   const bk = getBK();
 
   // Validaciones
@@ -1533,8 +1540,10 @@ function placeBet(match, market, odds, confidence, amount, fixtureId, league, mo
   saveBK(bk);
   syncBankrollTxToCloud(tx);
 
-  // También registrar en historial de apuestas
-  recordBet({match, market, odds, confidence, league, amount, modelVersion}, sharedId);
+  // También registrar en historial de apuestas -- mlFeatures viaja hasta
+  // aqui (Historial), que es donde se analiza el historial para ML futuro.
+  // No se guarda tambien en Banca para no duplicar el mismo dato en 2 lados.
+  recordBet({match, market, odds, confidence, league, amount, modelVersion, mlFeatures}, sharedId);
 
   return { ok:true, tx, remaining: getRemainingBetsToday(bk) };
 }
@@ -2221,6 +2230,8 @@ function handleBetClick(btn){
   const fixtureId = btn.getAttribute('data-fixture-id') || null;
   const league = btn.getAttribute('data-league') || null;
   const modelVersion = btn.getAttribute('data-model-version') || null;
+  const mlFeaturesRaw = btn.getAttribute('data-ml-features') || '';
+  const mlFeatures = mlFeaturesRaw ? decodeURIComponent(mlFeaturesRaw) : null;
 
   const inp = document.getElementById(safeId);
   const amt = inp ? parseFloat(inp.value)||defaultAmt : defaultAmt;
@@ -2233,7 +2244,7 @@ function handleBetClick(btn){
     return;
   }
 
-  const res = placeBet(match, market, odds, confidence, amt, fixtureId, league, modelVersion);
+  const res = placeBet(match, market, odds, confidence, amt, fixtureId, league, modelVersion, mlFeatures);
 
   if(res.ok){
     btn.style.background = '#3B6D11';
@@ -2497,6 +2508,7 @@ function buildKellyEVPanel(bet, matchLabel, matchData, siblingRank){
         data-fixture-id="${matchData?.fixtureId||''}"
         data-league="${matchData?.league||''}"
         data-model-version="${bet.modelVersion||''}"
+        data-ml-features="${encodeURIComponent(bet.mlFeatures||'')}"
         onclick="handleBetClick(this)"
         style="flex:1;font-size:12px;font-weight:600;background:#1a1a1a;color:#fff;border:none;border-radius:6px;padding:6px 10px;cursor:pointer;">
         💰 Apostar <span class="bet-btn-label">${adjustedAmount.toFixed(2)}</span>
@@ -3672,24 +3684,25 @@ function calcBets(m){
   function blendBTTSProbability() {
     const sources = [];
     if (poisBTTSConf !== null) {
-      sources.push({ prob: poisBTTSConf/100, weight: 3 });
+      sources.push({ name: 'poisson', prob: poisBTTSConf/100, weight: 3 });
     }
     if (h2h && h2h.sampleSize >= 3) {
-      sources.push({ prob: h2h.bttsRate, weight: Math.min(3, h2h.sampleSize * 0.4) });
+      sources.push({ name: 'h2h', prob: h2h.bttsRate, weight: Math.min(3, h2h.sampleSize * 0.4) });
     }
     const shotsSignal = Math.min(0.85, Math.max(0.25, 0.4 + (af2-2.0)*0.08));
-    sources.push({ prob: shotsSignal, weight: 1 });
+    sources.push({ name: 'shots', prob: shotsSignal, weight: 1 });
     if (!sources.length) return null;
     const totalWeight = sources.reduce(function(s,x){ return s+x.weight; }, 0);
     const blended = sources.reduce(function(s,x){ return s+x.prob*x.weight; }, 0) / totalWeight;
-    return blended;
+    return { prob: blended, sources: sources };
   }
   const bttsBlend = blendBTTSProbability();
   if (bttsBlend != null && af2>=2.0 && ag>=1.8) {
-    const bttsAdjProb = Math.min(0.92, Math.max(0.35, bttsBlend + (dixonColesAdj.btts||0)/100));
+    const bttsAdjProb = Math.min(0.92, Math.max(0.35, bttsBlend.prob + (dixonColesAdj.btts||0)/100));
     const bttsConfFinal = Math.round(bttsAdjProb*100);
     bets.push({market:'Ambos equipos marcan',odds:1.85,confidence:bttsConfFinal,
       factors:'FWD-Blend'+h2hTag+hvTag+poisTag+playerTag+injTag, modelVersion:'v2-blend',
+      mlFeatures: sourcesToFeatures(bttsBlend.sources),
       reason:`Probabilidad combinada (Poisson+H2H+ataque): ${bttsConfFinal}%${h2h?` · BTTS H2H:${Math.round(h2h.bttsRate*100)}%`:''}${poisBTTSConf?` · Poisson: ${poisBTTSConf}%`:''}${playerNote}`});
   }
 
@@ -3822,6 +3835,7 @@ function calcBets(m){
         odds: bestCornersLine >= 10.5 ? 1.95 : 1.80,
         confidence: cornersConf,
         factors: 'COR-Poisson' + (isRainy ? ' Lluvia-' : ''), modelVersion: 'v2-blend',
+        mlFeatures: JSON.stringify({ lambda: +totalCorners.toFixed(2), line: bestCornersLine, poissonProb: +cornersOverProb.toFixed(3), rain: isRainy?1:0 }),
         reason: `Poisson (λ=${totalCorners.toFixed(1)}): ${Math.round(cornersOverProb*100)}% probabilidad real de superar ${bestCornersLine}${isRainy ? ' · lluvia reduce ligeramente' : ''}`
       });
     }
@@ -3833,6 +3847,7 @@ function calcBets(m){
         odds: bestCornersLine <= 6.5 ? 2.05 : bestCornersLine <= 7.5 ? 1.95 : 1.85,
         confidence: cornersConf,
         factors: 'COR-Poisson', modelVersion: 'v2-blend',
+        mlFeatures: JSON.stringify({ lambda: +totalCorners.toFixed(2), line: bestCornersLine, poissonProb: +cornersUnderProb.toFixed(3) }),
         reason: `Poisson (λ=${totalCorners.toFixed(1)}): ${Math.round(cornersUnderProb*100)}% probabilidad real de quedar bajo ${bestCornersLine}`
       });
     }
@@ -3868,6 +3883,7 @@ function calcBets(m){
         odds: bestCardsLine >= 4.5 ? 1.95 : 1.75,
         confidence: cardsConf,
         factors: 'CARDS-Poisson' + (ref?.strictness === 'estricto' ? ' +Arb' : '') + (isHighStakes ? ' +Imp' : ''), modelVersion: 'v2-blend',
+        mlFeatures: JSON.stringify({ lambda: +totalCards.toFixed(2), line: bestCardsLine, poissonProb: +cardsOverProb.toFixed(3), refStrict: ref?.strictness === 'estricto' ? 1 : 0, highStakes: isHighStakes?1:0 }),
         reason: `Poisson (λ=${totalCards.toFixed(1)}): ${Math.round(cardsOverProb*100)}% probabilidad real de superar ${bestCardsLine}${ref ? ` · arbitro ${ref.strictness} (${ref.avgCards.toFixed(1)}/pj)` : ''}${isHighStakes ? ' · partido de alta intensidad' : ''}`
       });
     }
@@ -3958,29 +3974,29 @@ function calcBets(m){
       // tipica antes de usarla en la mezcla.
       const rawElo = isHome ? elo.homeProb : elo.awayProb;
       const eloProbAdjusted = 0.5 + (rawElo - 0.5) * (1 - TYPICAL_DRAW_RATE);
-      sources.push({ prob: eloProbAdjusted, weight: 3 });
+      sources.push({ name: 'elo', prob: eloProbAdjusted, weight: 3 });
     }
     if (h2h && h2h.sampleSize >= 3) {
       const p = isHome ? h2h.homeWinRate : h2h.awayWinRate;
-      sources.push({ prob: p, weight: Math.min(4, h2h.sampleSize * 0.5) });
+      sources.push({ name: 'h2h', prob: p, weight: Math.min(4, h2h.sampleSize * 0.5) });
     }
     const apiProb = isHome
       ? (predWH ? parseFloat(pred.percent?.home)/100 : null)
       : (predWA ? parseFloat(pred.percent?.away)/100 : null);
     if (apiProb != null && !isNaN(apiProb)) {
-      sources.push({ prob: apiProb, weight: 2 });
+      sources.push({ name: 'api', prob: apiProb, weight: 2 });
     }
     const rankDiff = (h.teamRank && a.teamRank) ? a.teamRank - h.teamRank : 0;
     const hXGdom = hXGdata && aXGdata ? (hXGdata.avgXG||0) - (aXGdata.avgXG||0) : 0;
     const hFormAdv = (h.form?.last5Goals||0) - (a.form?.last5Goals||0);
     const domScore = (isHome ? 1 : -1) * (rankDiff*0.01 + hXGdom*0.15 + hFormAdv*0.1);
     if (Math.abs(domScore) > 0.05) {
-      sources.push({ prob: Math.min(0.85, Math.max(0.15, 0.5 + domScore)), weight: 1.5 });
+      sources.push({ name: 'dom', prob: Math.min(0.85, Math.max(0.15, 0.5 + domScore)), weight: 1.5 });
     }
     if (!sources.length) return null;
     const totalWeight = sources.reduce(function(s,x){ return s+x.weight; }, 0);
     const blended = sources.reduce(function(s,x){ return s+x.prob*x.weight; }, 0) / totalWeight;
-    return { prob: blended, n: sources.length };
+    return { prob: blended, n: sources.length, sources: sources };
   }
 
   // MEJORA: victoria nunca incorporaba estadio neutral, rotacion/fatiga, ni
@@ -3993,6 +4009,17 @@ function calcBets(m){
   const fatigueProbNudge = ((hFat?.adjustments?.confidence||0) - (aFat?.adjustments?.confidence||0)) * 0.003;
   const keyPlayerProbNudge = ((hKeyPlaying?hKeyImpact:0) - (aKeyPlaying?aKeyImpact:0)) * 0.03;
 
+  // Convierte el desglose de fuentes de una mezcla en un JSON compacto para
+  // guardar por apuesta -- primer paso para poder analizar cada señal
+  // individual (ELO, H2H, API, dominio) por separado en el futuro, en vez de
+  // solo la confianza final ya mezclada.
+  function sourcesToFeatures(sources, extra) {
+    const obj = {};
+    (sources||[]).forEach(function(s){ obj[s.name] = +s.prob.toFixed(3); });
+    if (extra) Object.assign(obj, extra);
+    return JSON.stringify(obj);
+  }
+
   const homeBlend = blendVictoryProbability(true);
   if (homeBlend && m.odds.h <= 2.20) {
     let adjProb = homeBlend.prob + (necVictAdj/100)*0.4 + (rivalQualityAdj/100)*0.4 + neutralVenueProbNudge + fatigueProbNudge + keyPlayerProbNudge;
@@ -4000,6 +4027,7 @@ function calcBets(m){
     const conf = Math.round(adjProb*100);
     bets.push({market:`Victoria ${m.home.name}`,odds:m.odds.h,confidence:conf,
       factors:'Blend('+homeBlend.n+')'+necTag+tramiteTag+eloTag+(isNeutralVenue?' +Neutral':'')+playerTag, modelVersion:'v2-blend',
+      mlFeatures: sourcesToFeatures(homeBlend.sources, { nec: necVictAdj, rival: rivalQualityAdj, neutral: isNeutralVenue?1:0 }),
       reason:`Probabilidad combinada de ${homeBlend.n} fuente(s) (ELO+H2H+API+dominio): ${conf}%${necNote}${eloNote}${impNote}${isNeutralVenue?' · estadio neutral':''}${playerNote}`});
   }
   const awayBlend = blendVictoryProbability(false);
@@ -4009,6 +4037,7 @@ function calcBets(m){
     const conf = Math.round(adjProb*100);
     bets.push({market:`Victoria ${m.away.name}`,odds:m.odds.a,confidence:conf,
       factors:'Blend('+awayBlend.n+')'+necTag+tramiteTag+eloTag+(isNeutralVenue?' +Neutral':'')+playerTag, modelVersion:'v2-blend',
+      mlFeatures: sourcesToFeatures(awayBlend.sources, { nec: -necVictAdj, neutral: isNeutralVenue?1:0 }),
       reason:`Probabilidad combinada de ${awayBlend.n} fuente(s) (ELO+H2H+API+dominio): ${conf}%${necNote}${isNeutralVenue?' · estadio neutral':''}${playerNote}`});
   }
 
@@ -4541,6 +4570,45 @@ function getMarketLeagueCalibrationAdj(market, leagueKey) {
   return Math.max(-8, Math.min(8, Math.round(bias * 40)));
 }
 
+// ── REGRESION LOGISTICA (recalibracion tipo Platt scaling) ──────────────────
+function trainCalibrationRegression(marketCategory, iterations) {
+  const h = getHistory().filter(function(b){
+    return b.result !== 'pending' && (!marketCategory || getMarketCategory(b.market) === marketCategory);
+  });
+  if (h.length < 40) return null;
+  const X = h.map(function(b){ return (b.confidence||70)/100; });
+  const Y = h.map(function(b){ return b.result === 'win' ? 1 : 0; });
+  let a = 0, b = 1;
+  const lr = 0.5;
+  iterations = iterations || 800;
+  const n = X.length;
+  for (let iter = 0; iter < iterations; iter++) {
+    let gradA = 0, gradB = 0;
+    for (let i = 0; i < n; i++) {
+      const z = a + b * X[i];
+      const pred = 1 / (1 + Math.exp(-z));
+      const err = pred - Y[i];
+      gradA += err;
+      gradB += err * X[i];
+    }
+    a -= lr * gradA / n;
+    b -= lr * gradB / n;
+  }
+  const predictAdjusted = function(conf){ return (1/(1+Math.exp(-(a+b*(conf/100)))))*100; };
+  let mseRaw = 0, mseAdj = 0;
+  for (let i = 0; i < n; i++) {
+    const yPct = Y[i]*100;
+    mseRaw += Math.pow(X[i]*100 - yPct, 2);
+    mseAdj += Math.pow(predictAdjusted(X[i]*100) - yPct, 2);
+  }
+  return {
+    a: +a.toFixed(3), b: +b.toFixed(3), n: n,
+    predictAdjusted: predictAdjusted,
+    mseRaw: +(mseRaw/n).toFixed(1), mseAdj: +(mseAdj/n).toFixed(1),
+    improved: mseAdj < mseRaw,
+  };
+}
+
 // Devuelve TODAS las combinaciones mercado x liga con muestra suficiente
 // (>=6), sin filtrar por que tan malas sean.
 function getAllMarketLeagueCombos() {
@@ -4578,10 +4646,12 @@ function getWorstMarketLeagueCombos() {
 // mercados para que la comparacion sea de manzanas con manzanas -- otros
 // mercados (goles, BTTS, etc.) no se tocaron y no deberian mezclarse aqui.
 function getModelVersionComparison() {
-  const RESTRUCTURED_CATS = ['result', 'corners', 'cards'];
-  const h = getHistory().filter(function(b){
-    return b.result !== 'pending' && RESTRUCTURED_CATS.indexOf(getMarketCategory(b.market)) !== -1;
+  const RESTRUCTURED_CATS = ['result', 'corners', 'cards', 'btts'];
+  const allInCats = getHistory().filter(function(b){
+    return RESTRUCTURED_CATS.indexOf(getMarketCategory(b.market)) !== -1;
   });
+  const h = allInCats.filter(function(b){ return b.result !== 'pending'; });
+  const pendingV2Count = allInCats.filter(function(b){ return b.result === 'pending' && b.modelVersion === 'v2-blend'; }).length;
   const groups = {};
   h.forEach(function(b) {
     const v = b.modelVersion || 'v1 (formula anterior)';
@@ -4590,7 +4660,7 @@ function getModelVersionComparison() {
     groups[v].confSum += (b.confidence||70);
     if (b.result === 'win') groups[v].wins++;
   });
-  return Object.entries(groups).map(function(e) {
+  const results = Object.entries(groups).map(function(e) {
     const d = e[1];
     const winRate = d.total ? d.wins/d.total : 0;
     const avgConf = d.total ? d.confSum/d.total/100 : 0;
@@ -4600,6 +4670,8 @@ function getModelVersionComparison() {
       gap: Math.round((winRate-avgConf)*100), ci: wilsonInterval(d.wins, d.total),
     };
   }).sort(function(a,b){ return b.total - a.total; });
+  results.pendingV2Count = pendingV2Count;
+  return results;
 }
 
 // ── APLICADOR COMBINADO ───────────────────────────────────────────────────────
@@ -5830,6 +5902,71 @@ function renderProAnalysis() {
   const clv = getCLVStats();
 
   let html = '';
+
+  (function(){
+    var stats = getStats();
+    if (!stats) return;
+    var blockedMarketsCount = ['goals','result','btts','corners','cards'].filter(function(cat){
+      var h = getHistory().filter(function(b){ return b.result !== 'pending'; });
+      var inCat = h.filter(function(b){ return getMarketCategory(b.market) === cat; });
+      return inCat.length >= 30 && getMarketCalibrationAdj(cat) <= -12;
+    }).length;
+    var roiColor = stats.roi >= 0 ? '#3B6D11' : '#A32D2D';
+    var clvColor = clv.hasData && clv.avgCLV >= 0 ? '#3B6D11' : '#A32D2D';
+    html += '<div class="card" style="margin-bottom:10px;"><p class="section-label">🩺 Salud del sistema (resumen)</p>'
+      + '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">'
+      + '<div class="metric-card"><div class="metric-label">ROI general</div><div class="metric-val" style="color:' + roiColor + ';">' + (stats.roi>=0?'+':'') + stats.roi + '%</div></div>'
+      + '<div class="metric-card"><div class="metric-label">Cobertura CLV</div><div class="metric-val" style="color:' + clvColor + ';">' + clv.coveragePct + '%</div></div>'
+      + '<div class="metric-card"><div class="metric-label">Apuestas resueltas</div><div class="metric-val">' + stats.total + '</div></div>'
+      + '<div class="metric-card"><div class="metric-label">Mercados bloqueados</div><div class="metric-val" style="color:' + (blockedMarketsCount>0?'#854F0B':'#3B6D11') + ';">' + blockedMarketsCount + '</div></div>'
+      + '</div></div>';
+  })();
+
+  (function(){
+    var stats = getStats();
+    if (!stats) return;
+    var checks = [
+      { label: 'Cobertura de CLV ≥ 50%', pass: clv.coveragePct >= 50, val: clv.coveragePct + '%' },
+      { label: 'CLV promedio positivo', pass: clv.hasData && clv.avgCLV > 0, val: clv.hasData ? (clv.avgCLV>=0?'+':'')+clv.avgCLV.toFixed(2)+'%' : 'sin datos' },
+      { label: '% apuestas con CLV positivo ≥ 55%', pass: clv.hasData && clv.positiveRate >= 55, val: clv.hasData ? clv.positiveRate.toFixed(0)+'%' : 'sin datos' },
+      { label: 'Muestra total ≥ 500 resueltas', pass: stats.total >= 500, val: stats.total },
+      { label: 'ROI general no negativo', pass: stats.roi >= 0, val: (stats.roi>=0?'+':'')+stats.roi+'%' },
+      { label: 'Sin sobreajuste severo confirmado', pass: !bt.valid || !bt.isOverfit, val: bt.valid ? (bt.isOverfit ? 'sobreajuste detectado' : 'sin señales claras') : 'sin datos aun' },
+    ];
+    var passCount = checks.filter(function(ch){ return ch.pass; }).length;
+    html += '<div class="card" style="margin-bottom:10px;"><p class="section-label">✅ Checklist: listo para dinero real (' + passCount + '/' + checks.length + ')</p>';
+    checks.forEach(function(ch) {
+      html += '<div style="display:flex;justify-content:space-between;align-items:center;padding:5px 0;border-bottom:1px solid #f5f5f0;font-size:12px;">'
+        + '<span>' + (ch.pass?'✅':'⬜') + ' ' + ch.label + '</span>'
+        + '<span style="color:' + (ch.pass?'#3B6D11':'#999') + ';font-weight:600;">' + ch.val + '</span>'
+        + '</div>';
+    });
+    html += '<p style="font-size:10px;color:#999;margin-top:6px;">Guia de referencia, no una regla automatica -- usalo como apoyo para tu propia decision.</p></div>';
+  })();
+
+  (function(){
+    var milestones = [
+      'Fix de calibracion duplicada + verificacion sugerida de resultados',
+      'ROI por liga, exposicion total, filtro de fechas en Historial',
+      'Top 5 del dia + progreso mensual + retiro de ganancias por umbral',
+      'Bloqueo automatico de mercados/bandas/ligas con mal historial confirmado',
+      'Reestructuracion a probabilidad real: victoria (ELO+H2H+API), corners/tarjetas (Poisson)',
+      'Fix del sesgo de empates en ELO + factores de estadio neutral/rotacion/jugadores clave',
+      'BTTS con Poisson real (fix de doble conteo) + candado por muestra insuficiente',
+      'Graficos de ROI/acierto diario y evolucion por liga',
+      'Recalibracion por regresion logistica (Platt scaling) + paneles de resumen',
+      'Guardado de señales individuales por apuesta (ELO/H2H/API/dominio) para ML futuro',
+    ];
+    html += '<div class="card" style="margin-bottom:10px;"><p class="section-label">🕒 Cambios mayores del modelo (orden cronologico)</p>';
+    milestones.forEach(function(mLabel, i) {
+      html += '<div style="display:flex;gap:8px;padding:4px 0;font-size:11px;">'
+        + '<span style="color:#999;min-width:16px;">' + (i+1) + '.</span>'
+        + '<span style="color:#555;">' + mLabel + '</span>'
+        + '</div>';
+    });
+    html += '<p style="font-size:10px;color:#999;margin-top:6px;">Util para relacionar cambios en la curva de ROI (arriba en Historial) con actualizaciones especificas del modelo.</p></div>';
+  })();
+
   html += buildCalibrationChart();
 
   // ── Retroalimentacion automatica ──────────────────────────────────────────
@@ -5896,7 +6033,7 @@ function renderProAnalysis() {
     // corners, tarjetas -- los mercados reestructurados)
     var modelComparison = getModelVersionComparison();
     if (modelComparison.length > 0) {
-      html += '<p style="font-size:12px;font-weight:500;color:#555;margin-top:10px;margin-bottom:6px;">Comparacion de modelos (victoria/corners/tarjetas):</p>';
+      html += '<p style="font-size:12px;font-weight:500;color:#555;margin-top:10px;margin-bottom:6px;">Comparacion de modelos (victoria/corners/tarjetas/BTTS):</p>';
       modelComparison.forEach(function(mc) {
         var mcColor = mc.gap >= 0 ? '#3B6D11' : '#A32D2D';
         html += '<div style="background:#f5f5f0;border-radius:6px;padding:8px 10px;margin-bottom:6px;font-size:11px;">'
@@ -5907,7 +6044,26 @@ function renderProAnalysis() {
           + '<div style="color:#999;margin-top:2px;">Real: ' + mc.winRatePct + '% (IC 95%: ' + mc.ci.low + '-' + mc.ci.high + '%) vs predicho ' + mc.predPct + '% · <span style="color:' + mcColor + ';font-weight:600;">' + (mc.gap>=0?'+':'') + mc.gap + ' pts</span></div>'
           + '</div>';
       });
-      html += '<p style="font-size:10px;color:#999;margin-bottom:8px;">Con poca muestra en "v2-blend" todavia, mira el IC 95% antes de sacar conclusiones -- necesitas varias semanas de datos nuevos para comparar de forma confiable.</p>';
+      html += '<p style="font-size:10px;color:#999;margin-bottom:4px;">Con poca muestra en "v2-blend" todavia, mira el IC 95% antes de sacar conclusiones -- necesitas varias semanas de datos nuevos para comparar de forma confiable.</p>';
+      if (modelComparison.pendingV2Count > 0) {
+        html += '<p style="font-size:10px;color:#185FA5;margin-bottom:8px;">📌 Tienes ' + modelComparison.pendingV2Count + ' apuesta(s) del modelo nuevo (v2-blend) ya colocadas pero todavia PENDIENTES de resultado -- apareceran aqui en cuanto se resuelvan.</p>';
+      } else {
+        html += '<p style="font-size:10px;color:#854F0B;margin-bottom:8px;">⚠️ No hay ninguna apuesta v2-blend ni siquiera pendiente todavia -- las ultimas apuestas de estos mercados que colocaste fueron antes de la actualizacion del modelo.</p>';
+      }
+    }
+    var calReg = trainCalibrationRegression('goals');
+    if (calReg) {
+      html += '<p style="font-size:12px;font-weight:500;color:#555;margin-top:10px;margin-bottom:6px;">Recalibracion por regresion (goles, n=' + calReg.n + '):</p>';
+      html += '<div style="background:#f5f5f0;border-radius:6px;padding:8px 10px;margin-bottom:6px;font-size:11px;">';
+      [50,65,80].forEach(function(c) {
+        var adj = calReg.predictAdjusted(c).toFixed(0);
+        html += '<div style="display:flex;justify-content:space-between;padding:2px 0;">'
+          + '<span>Modelo dice ' + c + '%</span><span>→ probabilidad real ajustada: <b>' + adj + '%</b></span></div>';
+      });
+      html += '</div>';
+      var mseColor = calReg.improved ? '#3B6D11' : '#A32D2D';
+      html += '<p style="font-size:10px;color:' + mseColor + ';margin-bottom:2px;">Error (MSE) sin ajustar: ' + calReg.mseRaw + ' · con regresion: ' + calReg.mseAdj + (calReg.improved ? ' (la regresion reduce el error)' : ' (la regresion NO mejora -- el modelo actual ya esta razonablemente calibrado en goles)') + '</p>';
+      html += '<p style="font-size:10px;color:#999;margin-bottom:8px;">Nota: esto recalibra la confianza YA mezclada, no reentrena las señales individuales (ELO, H2H, xG) por separado -- esas ya se guardan por apuesta a partir de ahora (ver abajo).</p>';
     }
     if (Object.keys(factorCorr).length > 0) {
       html += '<p style="font-size:12px;font-weight:500;color:#555;margin-bottom:6px;">Factores mas predictivos (Nivel 4):</p><div style="display:flex;flex-wrap:wrap;gap:6px;">';
