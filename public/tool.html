@@ -251,7 +251,14 @@ input[type=range] { flex: 1; accent-color: #1a1a1a; height: 4px; }
       <div id="summary-table"></div>
     </div>
     <div style="background:#fff;border:1px solid #e5e5e5;border-radius:12px;padding:12px;margin-bottom:1rem;">
-      <p class="section-label" style="margin-bottom:8px;">Detalle de apuestas (fecha, equipo, concepto, cuota)</p>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+        <p class="section-label" style="margin:0;">Detalle de apuestas (fecha, equipo, concepto, cuota)</p>
+        <button onclick="toggleDetailSelectMode()" id="detail-select-toggle" style="font-size:11px;padding:5px 10px;border-radius:6px;border:1px solid #ddd;background:#fff;color:#555;cursor:pointer;">Seleccionar</button>
+      </div>
+      <div id="detail-select-bar" style="display:none;justify-content:space-between;align-items:center;background:#FFF5E6;border:1px solid #f0d080;border-radius:8px;padding:8px 10px;margin-bottom:8px;font-size:12px;">
+        <span id="detail-select-count">0 seleccionada(s)</span>
+        <button onclick="deleteSelectedDetailBets()" style="background:#A32D2D;color:#fff;border:none;border-radius:6px;padding:6px 12px;font-size:12px;cursor:pointer;">🗑️ Eliminar</button>
+      </div>
       <div id="detail-table"></div>
     </div>
     <details style="margin-bottom:1rem;">
@@ -1153,10 +1160,14 @@ function renderDetailTable(historyOverride) {
   const cur = getBK().currency || 'S/';
   const LIMIT = 100;
   const shown = h.slice(0, LIMIT);
+  if (typeof window._detailSelectMode === 'undefined') window._detailSelectMode = false;
+  if (typeof window._detailSelectedIds === 'undefined') window._detailSelectedIds = new Set();
+  const selMode = window._detailSelectMode;
+  const checkboxHeader = selMode ? '<th style="padding:4px 4px;width:24px;"></th>' : '';
   container.innerHTML = '<div style="max-height:400px;overflow-y:auto;">'
     + '<table style="width:100%;border-collapse:collapse;font-size:11px;">'
     + '<thead><tr style="text-align:left;color:#999;text-transform:uppercase;font-size:9px;letter-spacing:0.04em;border-bottom:1px solid #eee;">'
-    + '<th style="padding:4px 4px;">Fecha</th><th style="padding:4px 4px;">Equipo</th><th style="padding:4px 4px;">Concepto</th><th style="padding:4px 4px;text-align:right;">Cuota</th><th style="padding:4px 4px;text-align:right;">Apostado</th><th style="padding:4px 4px;text-align:right;">Retornado</th>'
+    + checkboxHeader + '<th style="padding:4px 4px;">Fecha</th><th style="padding:4px 4px;">Equipo</th><th style="padding:4px 4px;">Concepto</th><th style="padding:4px 4px;text-align:right;">Cuota</th><th style="padding:4px 4px;text-align:right;">Apostado</th><th style="padding:4px 4px;text-align:right;">Retornado</th>'
     + '</tr></thead><tbody>'
     + shown.map(function(b) {
         const dateLabel = new Date(b.date).toLocaleDateString('es', {day:'2-digit', month:'short', year:'2-digit'});
@@ -1164,7 +1175,10 @@ function renderDetailTable(historyOverride) {
         const amount = b.amount || 0;
         const returned = b.result === 'win' ? +(amount * (b.odds||1)).toFixed(2) : b.result === 'loss' ? 0 : null;
         const returnedLabel = returned === null ? '-' : cur + returned.toFixed(2);
+        const checked = window._detailSelectedIds.has(b.id) ? 'checked' : '';
+        const checkboxCell = selMode ? '<td style="padding:6px 4px;"><input type="checkbox" ' + checked + ' onchange="toggleDetailBetSelection(' + b.id + ')" style="cursor:pointer;"></td>' : '';
         return '<tr style="border-bottom:1px solid #f5f5f0;">'
+          + checkboxCell
           + '<td style="padding:6px 4px;color:#999;white-space:nowrap;">' + dateLabel + '</td>'
           + '<td style="padding:6px 4px;color:#333;">' + (b.match||'-') + '</td>'
           + '<td style="padding:6px 4px;color:#333;">' + (b.market||'-') + '</td>'
@@ -1175,6 +1189,40 @@ function renderDetailTable(historyOverride) {
       }).join('')
     + '</tbody></table></div>'
     + (h.length > shown.length ? '<p style="font-size:10px;color:#999;margin-top:6px;">Mostrando las ' + LIMIT + ' mas recientes de ' + h.length + ' totales.</p>' : '');
+}
+
+function toggleDetailSelectMode() {
+  window._detailSelectMode = !window._detailSelectMode;
+  if (!window._detailSelectMode) window._detailSelectedIds = new Set();
+  const btn = document.getElementById('detail-select-toggle');
+  const bar = document.getElementById('detail-select-bar');
+  if (btn) btn.textContent = window._detailSelectMode ? 'Cancelar' : 'Seleccionar';
+  if (bar) bar.style.display = window._detailSelectMode ? 'flex' : 'none';
+  renderDetailTable(getFilteredHistory(window._historyDaysFilter));
+}
+
+function toggleDetailBetSelection(id) {
+  if (window._detailSelectedIds.has(id)) window._detailSelectedIds.delete(id);
+  else window._detailSelectedIds.add(id);
+  const countEl = document.getElementById('detail-select-count');
+  if (countEl) countEl.textContent = window._detailSelectedIds.size + ' seleccionada(s)';
+}
+
+function deleteSelectedDetailBets() {
+  const ids = Array.from(window._detailSelectedIds);
+  if (!ids.length) { showToast('No has seleccionado ninguna apuesta', 'warning'); return; }
+  showConfirm('¿Eliminar ' + ids.length + ' apuesta(s) seleccionada(s)? Esto tambien las quita de Banca (y ajusta tu saldo). No se puede deshacer.', function() {
+    const deleted = deleteBetsAndBankroll(ids);
+    window._detailSelectedIds = new Set();
+    window._detailSelectMode = false;
+    const btn = document.getElementById('detail-select-toggle');
+    const bar = document.getElementById('detail-select-bar');
+    if (btn) btn.textContent = 'Seleccionar';
+    if (bar) bar.style.display = 'none';
+    showToast(deleted + ' apuesta(s) eliminada(s)', 'success');
+    renderHistory();
+    renderBankroll();
+  });
 }
 
 
@@ -2067,6 +2115,58 @@ function reconcileHistoryWithBankroll() {
   if (fixed > 0) saveHistory(h);
   showToast(fixed > 0 ? 'Se sincronizaron ' + fixed + ' resultado(s) de Banca hacia Historial' : 'No se encontraron desincronizaciones para reparar', 'success', 5000);
   renderHistory();
+}
+
+// ── ELIMINAR APUESTAS SELECCIONADAS ─────────────────────────────────────
+// Borra de Historial Y de Banca (incluyendo la transaccion de "retorno"
+// vinculada si la apuesta gano), y recalcula el saldo de Banca desde cero
+// con las transacciones restantes -- mas robusto que sumar/restar a mano.
+// LIMITACION CONOCIDA: el id local (numerico) y el id que Supabase asigna
+// en la nube (UUID) no son el mismo dato -- nunca se guardo ese mapeo. El
+// borrado en la nube es "mejor esfuerzo" por contenido (partido+mercado+
+// fecha cercana), no una eliminacion garantizada por id exacto.
+function deleteBetsAndBankroll(ids) {
+  if (!ids || !ids.length) return 0;
+  const idsSet = new Set(ids);
+
+  let h = getHistory();
+  const toDelete = h.filter(function(b){ return idsSet.has(b.id); });
+  h = h.filter(function(b){ return !idsSet.has(b.id); });
+  saveHistory(h);
+
+  const bk = getBK();
+  bk.transactions = (bk.transactions||[]).filter(function(t){
+    if (t.type === 'bet' && idsSet.has(t.id)) return false;
+    if (t.type === 'return' && idsSet.has(t.relatedId)) return false;
+    return true;
+  });
+  const sumType = function(type) { return bk.transactions.filter(function(t){ return t.type === type; }).reduce(function(s,t){ return s+t.amount; }, 0); };
+  bk.current = +(bk.initial + sumType('deposit') - sumType('withdraw') - sumType('bet') + sumType('return')).toFixed(2);
+  saveBK(bk);
+
+  deleteBetsFromCloud(toDelete);
+  return toDelete.length;
+}
+
+async function deleteBetsFromCloud(betsToDelete) {
+  if (!_sb || !_sbUser || !betsToDelete.length) return;
+  try {
+    const { data: sessionData } = await _sb.auth.getSession();
+    const token = sessionData?.session?.access_token;
+    if (!token) return;
+    for (const b of betsToDelete) {
+      // Emparejar por contenido (mismo id local no existe en la nube) --
+      // partido + mercado + fecha exacta, para minimizar el riesgo de
+      // borrar una fila equivocada si hay duplicados.
+      await fetch(SUPABASE_URL + '/rest/v1/bets?user_id=eq.' + _sbUser.id
+        + '&match=eq.' + encodeURIComponent(b.match||'')
+        + '&market=eq.' + encodeURIComponent(b.market||'')
+        + '&created_at=eq.' + encodeURIComponent(b.date||''), {
+        method: 'DELETE',
+        headers: { 'apikey': SUPABASE_KEY, 'Authorization': 'Bearer ' + token },
+      });
+    }
+  } catch(e) { console.warn('Eliminar de la nube fallo (no bloqueante):', e.message); }
 }
 
 function showSyncDiagnostic() {
@@ -3708,12 +3808,28 @@ function calcBets(m){
   const aCtxGoals = isNeutralVenue ? aGoalsSafe : (a.isHomeContext!==null?aFormGoals:aGoalsSafe);
 
   // GOLES totales con todos los ajustes
-  const indGoalsRaw=((hCtxGoals*(1-hIP)+homeGoalsAdj+hDefAdj+hXGadj+hLuckGoalsAdj+hPressingGoalsAdj+aCtxGoals*(1-aIP)+awayGoalsAdj+aDefAdj+aXGadj+aLuckGoalsAdj+aPressingGoalsAdj)/2)+weatherGoalsAdj+refGoalsAdj+impGoalsAdj+playerGoalsAdj+necGoalsAdj+knockoutGoalsAdj+neutralVenueAdj+streakGoalsAdj+formationGoalsAdj;
+  // BUGFIX CRITICO: hCtxGoals y aCtxGoals son el promedio de goles de CADA
+  // equipo por separado (confirmado via safeCtx, que lee stats individuales
+  // de cada equipo). Para un estimado de goles TOTALES del partido, estos
+  // deben SUMARSE, no promediarse -- la division entre 2 que habia aqui
+  // reducia el estimado a casi la mitad de su valor real en la mayoria de
+  // los partidos, causando que "Menos de 2.5 goles" se sugiriera con
+  // muchisima mas frecuencia de la que deberia. Los ajustes de partido
+  // completo (clima, arbitro, importancia, etc.) ya estaban correctamente
+  // fuera de la agrupacion afectada y no se tocan.
+  const indGoalsRaw=(hCtxGoals*(1-hIP)+homeGoalsAdj+hDefAdj+hXGadj+hLuckGoalsAdj+hPressingGoalsAdj+aCtxGoals*(1-aIP)+awayGoalsAdj+aDefAdj+aXGadj+aLuckGoalsAdj+aPressingGoalsAdj)+weatherGoalsAdj+refGoalsAdj+impGoalsAdj+playerGoalsAdj+necGoalsAdj+knockoutGoalsAdj+neutralVenueAdj+streakGoalsAdj+formationGoalsAdj;
   // MEJORA: indGoals combina ~13 ajustes distintos (clima, arbitro, importancia,
   // jugadores, necesidad, eliminatoria, racha, formacion...) sin ningun limite.
   // Rango realista de goles totales esperados por partido: 0.3-5.5.
   const indGoals = Math.max(0.3, Math.min(5.5, indGoalsRaw));
-  const ag=Math.max(0.3, Math.min(6.5, h2h?indGoals*W_IND+h2h.avgGoals*W_H2H:indGoals));
+  // MEJORA: usar los lambdas de Poisson (m.lambdaHome/m.lambdaAway) como
+  // fuente PRIMARIA -- estos ya se ajustan por la fuerza defensiva del
+  // rival especifico, a diferencia de indGoals que solo usa el promedio
+  // aislado de cada equipo. Se usa indGoals (ya corregido arriba) solo
+  // como respaldo si los lambdas no estan disponibles para este partido.
+  const lambdaSum = (m.lambdaHome != null && m.lambdaAway != null) ? (m.lambdaHome + m.lambdaAway) : null;
+  const preferredGoalsEstimate = lambdaSum != null ? lambdaSum : indGoals;
+  const ag=Math.max(0.3, Math.min(6.5, h2h?preferredGoalsEstimate*W_IND+h2h.avgGoals*W_H2H:preferredGoalsEstimate));
 
   // CÓRNERS
   const indCorners=((hCornersSafe+homeCornersAdj+aCornersSafe+awayCornersAdj)/2)+weatherCornersAdj;
