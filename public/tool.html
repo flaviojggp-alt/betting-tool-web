@@ -1007,11 +1007,14 @@ function getDailyStats(historyOverride) {
   const byDay = {};
   h.forEach(function(b) {
     const day = new Date(b.date).toISOString().slice(0,10);
-    if (!byDay[day]) byDay[day] = { day: day, total: 0, wins: 0, unitsPnl: 0 };
+    if (!byDay[day]) byDay[day] = { day: day, total: 0, wins: 0, unitsPnl: 0, staked: 0, returned: 0 };
     byDay[day].total++;
+    const amount = b.amount || 0;
+    byDay[day].staked += amount;
     if (b.result === 'win') {
       byDay[day].wins++;
       byDay[day].unitsPnl += (b.odds - 1);
+      byDay[day].returned += amount * (b.odds||1);
     } else {
       byDay[day].unitsPnl -= 1;
     }
@@ -1021,6 +1024,8 @@ function getDailyStats(historyOverride) {
       day: d.day, total: d.total,
       winRate: Math.round(d.wins/d.total*100),
       roi: +((d.unitsPnl/d.total)*100).toFixed(1),
+      staked: +d.staked.toFixed(2),
+      returned: +d.returned.toFixed(2),
     };
   }).sort(function(a,b){ return a.day.localeCompare(b.day); });
 }
@@ -1029,20 +1034,27 @@ function getDailyStats(historyOverride) {
 // Agrupa apuestas resueltas por equipo -- cada apuesta cuenta hacia AMBOS
 // equipos del partido ("Equipo A vs Equipo B"), sin importar si la jugada
 // era especificamente sobre uno de ellos (ej. "Menos de 2.5 goles" tambien
-// cuenta para los 2 equipos involucrados en ese partido).
+// cuenta para los 2 equipos involucrados en ese partido). Esto tambien
+// aplica a staked/returned -- una apuesta suma su monto completo a AMBOS
+// equipos, asi que sumar staked/returned entre todos los equipos no da el
+// total real (se cuenta cada apuesta dos veces), consistente con como ya
+// funciona total/wins en esta misma vista.
 function getTeamStats(historyOverride) {
   const h = (historyOverride || getHistory()).filter(function(b){ return b.result !== 'pending'; });
   const byTeam = {};
   h.forEach(function(b) {
     const parts = (b.match||'').split(' vs ');
     if (parts.length !== 2) return;
+    const amount = b.amount || 0;
     [parts[0].trim(), parts[1].trim()].forEach(function(team) {
       if (!team) return;
-      if (!byTeam[team]) byTeam[team] = { team: team, total: 0, wins: 0, unitsPnl: 0 };
+      if (!byTeam[team]) byTeam[team] = { team: team, total: 0, wins: 0, unitsPnl: 0, staked: 0, returned: 0 };
       byTeam[team].total++;
+      byTeam[team].staked += amount;
       if (b.result === 'win') {
         byTeam[team].wins++;
         byTeam[team].unitsPnl += (b.odds - 1);
+        byTeam[team].returned += amount * (b.odds||1);
       } else {
         byTeam[team].unitsPnl -= 1;
       }
@@ -1053,6 +1065,8 @@ function getTeamStats(historyOverride) {
       team: d.team, total: d.total,
       winRate: Math.round(d.wins/d.total*100),
       roi: +((d.unitsPnl/d.total)*100).toFixed(1),
+      staked: +d.staked.toFixed(2),
+      returned: +d.returned.toFixed(2),
     };
   }).sort(function(a,b){ return b.total - a.total; });
 }
@@ -1066,6 +1080,7 @@ function renderSummaryTable(historyOverride) {
   if (!container) return;
   if (typeof window._summaryMode === 'undefined') window._summaryMode = 'date';
   const mode = window._summaryMode;
+  const cur = getBK().currency || 'S/';
 
   ['date','league','team'].forEach(function(m) {
     const btn = document.getElementById('summary-btn-' + m);
@@ -1080,17 +1095,17 @@ function renderSummaryTable(historyOverride) {
   let nameLabel = 'Fecha';
   if (mode === 'date') {
     rows = getDailyStats(historyOverride).slice().reverse().map(function(d) {
-      return { name: new Date(d.day + 'T00:00:00').toLocaleDateString('es', {day:'2-digit', month:'short', year:'numeric'}), total: d.total, winRate: d.winRate, roi: d.roi };
+      return { name: new Date(d.day + 'T00:00:00').toLocaleDateString('es', {day:'2-digit', month:'short', year:'numeric'}), total: d.total, winRate: d.winRate, roi: d.roi, staked: d.staked, returned: d.returned };
     });
   } else if (mode === 'league') {
     nameLabel = 'Liga';
     rows = getRoiByLeague(historyOverride).map(function(l) {
-      return { name: l.league, total: l.total, winRate: l.winRate, roi: l.roi };
+      return { name: l.league, total: l.total, winRate: l.winRate, roi: l.roi, staked: l.staked, returned: l.returned };
     });
   } else {
     nameLabel = 'Equipo';
     rows = getTeamStats(historyOverride).map(function(t) {
-      return { name: t.team, total: t.total, winRate: t.winRate, roi: t.roi };
+      return { name: t.team, total: t.total, winRate: t.winRate, roi: t.roi, staked: t.staked, returned: t.returned };
     });
   }
 
@@ -1099,20 +1114,26 @@ function renderSummaryTable(historyOverride) {
     return;
   }
 
-  container.innerHTML = '<div style="max-height:320px;overflow-y:auto;">'
-    + '<div style="display:flex;justify-content:space-between;padding:4px 0;font-size:10px;color:#999;text-transform:uppercase;letter-spacing:0.04em;border-bottom:1px solid #eee;">'
-    + '<span style="flex:2;">' + nameLabel + '</span><span style="flex:1;text-align:center;">Apuestas</span><span style="flex:1;text-align:center;">Acierto</span><span style="flex:1;text-align:right;">ROI</span>'
-    + '</div>'
+  // Tabla en vez de flex -- con 6 columnas (se agregaron Apostado/Retornado)
+  // un layout flex se veria muy apretado en movil; una tabla con scroll
+  // horizontal mantiene cada columna legible.
+  container.innerHTML = '<div style="max-height:320px;overflow:auto;">'
+    + '<table style="width:100%;min-width:520px;border-collapse:collapse;font-size:11px;">'
+    + '<thead><tr style="text-align:left;color:#999;text-transform:uppercase;font-size:9px;letter-spacing:0.04em;border-bottom:1px solid #eee;position:sticky;top:0;background:#fff;">'
+    + '<th style="padding:4px 6px;">' + nameLabel + '</th><th style="padding:4px 6px;text-align:center;">Apuestas</th><th style="padding:4px 6px;text-align:center;">Acierto</th><th style="padding:4px 6px;text-align:right;">Apostado</th><th style="padding:4px 6px;text-align:right;">Retornado</th><th style="padding:4px 6px;text-align:right;">ROI</th>'
+    + '</tr></thead><tbody>'
     + rows.map(function(r) {
         const roiColor = r.roi >= 0 ? '#3B6D11' : '#A32D2D';
-        return '<div style="display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid #f5f5f0;font-size:12px;">'
-          + '<span style="flex:2;color:#333;">' + r.name + '</span>'
-          + '<span style="flex:1;text-align:center;color:#999;">' + r.total + '</span>'
-          + '<span style="flex:1;text-align:center;color:#999;">' + r.winRate + '%</span>'
-          + '<span style="flex:1;text-align:right;color:' + roiColor + ';font-weight:600;">' + (r.roi>=0?'+':'') + r.roi + '%</span>'
-          + '</div>';
+        return '<tr style="border-bottom:1px solid #f5f5f0;">'
+          + '<td style="padding:6px;color:#333;">' + r.name + '</td>'
+          + '<td style="padding:6px;text-align:center;color:#999;">' + r.total + '</td>'
+          + '<td style="padding:6px;text-align:center;color:#999;">' + r.winRate + '%</td>'
+          + '<td style="padding:6px;text-align:right;color:#999;">' + cur + r.staked.toFixed(2) + '</td>'
+          + '<td style="padding:6px;text-align:right;color:#999;">' + cur + r.returned.toFixed(2) + '</td>'
+          + '<td style="padding:6px;text-align:right;color:' + roiColor + ';font-weight:600;">' + (r.roi>=0?'+':'') + r.roi + '%</td>'
+          + '</tr>';
       }).join('')
-    + '</div>';
+    + '</tbody></table></div>';
 }
 
 // ── DETALLE DE APUESTAS (fecha, equipo, concepto, cuota) ─────────────────
@@ -1128,21 +1149,27 @@ function renderDetailTable(historyOverride) {
     container.innerHTML = '<p style="font-size:12px;color:#999;text-align:center;padding:8px 0;">No hay apuestas registradas todavia.</p>';
     return;
   }
+  const cur = getBK().currency || 'S/';
   const LIMIT = 100;
   const shown = h.slice(0, LIMIT);
   container.innerHTML = '<div style="max-height:400px;overflow-y:auto;">'
     + '<table style="width:100%;border-collapse:collapse;font-size:11px;">'
     + '<thead><tr style="text-align:left;color:#999;text-transform:uppercase;font-size:9px;letter-spacing:0.04em;border-bottom:1px solid #eee;">'
-    + '<th style="padding:4px 4px;">Fecha</th><th style="padding:4px 4px;">Equipo</th><th style="padding:4px 4px;">Concepto</th><th style="padding:4px 4px;text-align:right;">Cuota</th>'
+    + '<th style="padding:4px 4px;">Fecha</th><th style="padding:4px 4px;">Equipo</th><th style="padding:4px 4px;">Concepto</th><th style="padding:4px 4px;text-align:right;">Cuota</th><th style="padding:4px 4px;text-align:right;">Apostado</th><th style="padding:4px 4px;text-align:right;">Retornado</th>'
     + '</tr></thead><tbody>'
     + shown.map(function(b) {
         const dateLabel = new Date(b.date).toLocaleDateString('es', {day:'2-digit', month:'short', year:'2-digit'});
         const resultColor = b.result === 'win' ? '#3B6D11' : b.result === 'loss' ? '#A32D2D' : '#999';
+        const amount = b.amount || 0;
+        const returned = b.result === 'win' ? +(amount * (b.odds||1)).toFixed(2) : b.result === 'loss' ? 0 : null;
+        const returnedLabel = returned === null ? '-' : cur + returned.toFixed(2);
         return '<tr style="border-bottom:1px solid #f5f5f0;">'
           + '<td style="padding:6px 4px;color:#999;white-space:nowrap;">' + dateLabel + '</td>'
           + '<td style="padding:6px 4px;color:#333;">' + (b.match||'-') + '</td>'
           + '<td style="padding:6px 4px;color:#333;">' + (b.market||'-') + '</td>'
           + '<td style="padding:6px 4px;text-align:right;font-weight:600;color:' + resultColor + ';">' + (b.odds||'-') + 'x</td>'
+          + '<td style="padding:6px 4px;text-align:right;color:#999;">' + cur + amount.toFixed(2) + '</td>'
+          + '<td style="padding:6px 4px;text-align:right;color:' + (returned===null?'#999':resultColor) + ';">' + returnedLabel + '</td>'
           + '</tr>';
       }).join('')
     + '</tbody></table></div>'
@@ -5272,11 +5299,14 @@ function getRoiByLeague(historyOverride) {
   const byLeague = {};
   h.forEach(function(b) {
     const league = getLeagueLabel(b.league);
-    if (!byLeague[league]) byLeague[league] = { wins: 0, total: 0, unitsPnl: 0 };
+    if (!byLeague[league]) byLeague[league] = { wins: 0, total: 0, unitsPnl: 0, staked: 0, returned: 0 };
     byLeague[league].total++;
+    const amount = b.amount || 0;
+    byLeague[league].staked += amount;
     if (b.result === 'win') {
       byLeague[league].wins++;
       byLeague[league].unitsPnl += (b.odds - 1);
+      byLeague[league].returned += amount * (b.odds||1);
     } else {
       byLeague[league].unitsPnl -= 1;
     }
@@ -5287,12 +5317,14 @@ function getRoiByLeague(historyOverride) {
       league: e[0],
       total: d.total,
       winRate: d.total ? Math.round(d.wins/d.total*100) : 0,
-      // BUGFIX: antes usaba b.amount (staked/returned) para el ROI, pero
-      // b.amount NUNCA se pasa al registrar la apuesta desde placeBet() --
-      // siempre quedaba en 0, asi que el ROI siempre salia +0% sin importar
-      // el resultado real. Ahora usa el mismo stake plano de 1 unidad por
-      // apuesta que ya usa getStats() -- consistente y no depende de amount.
+      // NOTA: el ROI aqui sigue usando stake plano de 1 unidad por apuesta
+      // (igual que getStats()), NO el monto real -- esto se mantiene por
+      // consistencia con el resto del dashboard. amount SI se guarda de
+      // forma confiable desde el fix de recordBet, y se usa abajo solo para
+      // los totales de staked/returned (columnas nuevas de la tabla).
       roi: d.total ? +((d.unitsPnl/d.total)*100).toFixed(1) : 0,
+      staked: +d.staked.toFixed(2),
+      returned: +d.returned.toFixed(2),
     };
   }).sort(function(a,b){ return b.roi - a.roi; });
 }
