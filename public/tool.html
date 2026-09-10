@@ -240,6 +240,15 @@ input[type=range] { flex: 1; accent-color: #1a1a1a; height: 4px; }
   <!-- RESULTADOS -->
   <div id="tab-history" style="display:none;">
     <div id="history-stats" style="margin-bottom:1rem;"></div>
+    <div style="background:#fff;border:1px solid #e5e5e5;border-radius:12px;padding:12px;margin-bottom:1rem;">
+      <p class="section-label" style="margin-bottom:8px;">Resumen por</p>
+      <div style="display:flex;gap:6px;margin-bottom:10px;">
+        <button onclick="window._summaryMode='date';renderHistory();" id="summary-btn-date" style="flex:1;font-size:12px;padding:7px;border-radius:6px;cursor:pointer;border:1px solid #ddd;background:#fff;color:#555;">Fecha</button>
+        <button onclick="window._summaryMode='league';renderHistory();" id="summary-btn-league" style="flex:1;font-size:12px;padding:7px;border-radius:6px;cursor:pointer;border:1px solid #ddd;background:#fff;color:#555;">Liga</button>
+        <button onclick="window._summaryMode='team';renderHistory();" id="summary-btn-team" style="flex:1;font-size:12px;padding:7px;border-radius:6px;cursor:pointer;border:1px solid #ddd;background:#fff;color:#555;">Equipo</button>
+      </div>
+      <div id="summary-table"></div>
+    </div>
     <details style="margin-bottom:1rem;">
       <summary class="section-label" style="cursor:pointer;">Jugadas registradas (ver lista completa)</summary>
       <div id="history-list" style="margin-top:8px;"></div>
@@ -1011,6 +1020,98 @@ function getDailyStats(historyOverride) {
     };
   }).sort(function(a,b){ return a.day.localeCompare(b.day); });
 }
+
+// ── ESTADISTICAS POR EQUIPO ──────────────────────────────────────────────
+// Agrupa apuestas resueltas por equipo -- cada apuesta cuenta hacia AMBOS
+// equipos del partido ("Equipo A vs Equipo B"), sin importar si la jugada
+// era especificamente sobre uno de ellos (ej. "Menos de 2.5 goles" tambien
+// cuenta para los 2 equipos involucrados en ese partido).
+function getTeamStats(historyOverride) {
+  const h = (historyOverride || getHistory()).filter(function(b){ return b.result !== 'pending'; });
+  const byTeam = {};
+  h.forEach(function(b) {
+    const parts = (b.match||'').split(' vs ');
+    if (parts.length !== 2) return;
+    [parts[0].trim(), parts[1].trim()].forEach(function(team) {
+      if (!team) return;
+      if (!byTeam[team]) byTeam[team] = { team: team, total: 0, wins: 0, unitsPnl: 0 };
+      byTeam[team].total++;
+      if (b.result === 'win') {
+        byTeam[team].wins++;
+        byTeam[team].unitsPnl += (b.odds - 1);
+      } else {
+        byTeam[team].unitsPnl -= 1;
+      }
+    });
+  });
+  return Object.values(byTeam).map(function(d) {
+    return {
+      team: d.team, total: d.total,
+      winRate: Math.round(d.wins/d.total*100),
+      roi: +((d.unitsPnl/d.total)*100).toFixed(1),
+    };
+  }).sort(function(a,b){ return b.total - a.total; });
+}
+
+// ── RESUMEN POR FECHA / LIGA / EQUIPO ────────────────────────────────────
+// Tabla agrupada segun el selector activo -- reutiliza getDailyStats,
+// getRoiByLeague y getTeamStats, que ya existian para los graficos, asi que
+// esto no duplica logica de calculo, solo agrega la vista tabular.
+function renderSummaryTable(historyOverride) {
+  const container = document.getElementById('summary-table');
+  if (!container) return;
+  if (typeof window._summaryMode === 'undefined') window._summaryMode = 'date';
+  const mode = window._summaryMode;
+
+  ['date','league','team'].forEach(function(m) {
+    const btn = document.getElementById('summary-btn-' + m);
+    if (btn) {
+      btn.style.background = m === mode ? '#1a1a1a' : '#fff';
+      btn.style.color = m === mode ? '#fff' : '#555';
+      btn.style.borderColor = m === mode ? '#1a1a1a' : '#ddd';
+    }
+  });
+
+  let rows = [];
+  let nameLabel = 'Fecha';
+  if (mode === 'date') {
+    rows = getDailyStats(historyOverride).slice().reverse().map(function(d) {
+      return { name: new Date(d.day + 'T00:00:00').toLocaleDateString('es', {day:'2-digit', month:'short', year:'numeric'}), total: d.total, winRate: d.winRate, roi: d.roi };
+    });
+  } else if (mode === 'league') {
+    nameLabel = 'Liga';
+    rows = getRoiByLeague(historyOverride).map(function(l) {
+      return { name: l.league, total: l.total, winRate: l.winRate, roi: l.roi };
+    });
+  } else {
+    nameLabel = 'Equipo';
+    rows = getTeamStats(historyOverride).map(function(t) {
+      return { name: t.team, total: t.total, winRate: t.winRate, roi: t.roi };
+    });
+  }
+
+  if (!rows.length) {
+    container.innerHTML = '<p style="font-size:12px;color:#999;text-align:center;padding:8px 0;">No hay datos suficientes todavia.</p>';
+    return;
+  }
+
+  container.innerHTML = '<div style="max-height:320px;overflow-y:auto;">'
+    + '<div style="display:flex;justify-content:space-between;padding:4px 0;font-size:10px;color:#999;text-transform:uppercase;letter-spacing:0.04em;border-bottom:1px solid #eee;">'
+    + '<span style="flex:2;">' + nameLabel + '</span><span style="flex:1;text-align:center;">Apuestas</span><span style="flex:1;text-align:center;">Acierto</span><span style="flex:1;text-align:right;">ROI</span>'
+    + '</div>'
+    + rows.map(function(r) {
+        const roiColor = r.roi >= 0 ? '#3B6D11' : '#A32D2D';
+        return '<div style="display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid #f5f5f0;font-size:12px;">'
+          + '<span style="flex:2;color:#333;">' + r.name + '</span>'
+          + '<span style="flex:1;text-align:center;color:#999;">' + r.total + '</span>'
+          + '<span style="flex:1;text-align:center;color:#999;">' + r.winRate + '%</span>'
+          + '<span style="flex:1;text-align:right;color:' + roiColor + ';font-weight:600;">' + (r.roi>=0?'+':'') + r.roi + '%</span>'
+          + '</div>';
+      }).join('')
+    + '</div>';
+}
+
+
 
 function getStats(historyOverride){
   const full = historyOverride || getHistory();
@@ -2264,6 +2365,7 @@ function renderHistory(){
   // Filtro de rango de fechas -- por defecto 'todo', se recuerda en la sesion
   if (typeof window._historyDaysFilter === 'undefined') window._historyDaysFilter = null;
   const filteredHistory = getFilteredHistory(window._historyDaysFilter);
+  renderSummaryTable(filteredHistory);
   const stats = getStats(filteredHistory);
   const mr = document.getElementById('history-stats');
   const filterBar = `<button onclick="restoreHistoryFromCloud()" style="width:100%;margin-bottom:8px;font-size:12px;padding:8px;border-radius:6px;cursor:pointer;border:1px solid #185FA5;background:#E6F1FB;color:#185FA5;">☁️ Restaurar historial completo desde la nube</button>
