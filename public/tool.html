@@ -249,6 +249,10 @@ input[type=range] { flex: 1; accent-color: #1a1a1a; height: 4px; }
       </div>
       <div id="summary-table"></div>
     </div>
+    <div style="background:#fff;border:1px solid #e5e5e5;border-radius:12px;padding:12px;margin-bottom:1rem;">
+      <p class="section-label" style="margin-bottom:8px;">Detalle de apuestas (fecha, equipo, concepto, cuota)</p>
+      <div id="detail-table"></div>
+    </div>
     <details style="margin-bottom:1rem;">
       <summary class="section-label" style="cursor:pointer;">Jugadas registradas (ver lista completa)</summary>
       <div id="history-list" style="margin-top:8px;"></div>
@@ -1109,6 +1113,40 @@ function renderSummaryTable(historyOverride) {
           + '</div>';
       }).join('')
     + '</div>';
+}
+
+// ── DETALLE DE APUESTAS (fecha, equipo, concepto, cuota) ─────────────────
+// Tabla de apuestas individuales, sin agrupar -- distinto del resumen de
+// arriba (que agrupa por fecha/liga/equipo). Ordenada de mas reciente a mas
+// antigua, con un limite de filas para no saturar el DOM en historiales
+// grandes.
+function renderDetailTable(historyOverride) {
+  const container = document.getElementById('detail-table');
+  if (!container) return;
+  const h = (historyOverride || getHistory()).slice().sort(function(a,b){ return new Date(b.date) - new Date(a.date); });
+  if (!h.length) {
+    container.innerHTML = '<p style="font-size:12px;color:#999;text-align:center;padding:8px 0;">No hay apuestas registradas todavia.</p>';
+    return;
+  }
+  const LIMIT = 100;
+  const shown = h.slice(0, LIMIT);
+  container.innerHTML = '<div style="max-height:400px;overflow-y:auto;">'
+    + '<table style="width:100%;border-collapse:collapse;font-size:11px;">'
+    + '<thead><tr style="text-align:left;color:#999;text-transform:uppercase;font-size:9px;letter-spacing:0.04em;border-bottom:1px solid #eee;">'
+    + '<th style="padding:4px 4px;">Fecha</th><th style="padding:4px 4px;">Equipo</th><th style="padding:4px 4px;">Concepto</th><th style="padding:4px 4px;text-align:right;">Cuota</th>'
+    + '</tr></thead><tbody>'
+    + shown.map(function(b) {
+        const dateLabel = new Date(b.date).toLocaleDateString('es', {day:'2-digit', month:'short', year:'2-digit'});
+        const resultColor = b.result === 'win' ? '#3B6D11' : b.result === 'loss' ? '#A32D2D' : '#999';
+        return '<tr style="border-bottom:1px solid #f5f5f0;">'
+          + '<td style="padding:6px 4px;color:#999;white-space:nowrap;">' + dateLabel + '</td>'
+          + '<td style="padding:6px 4px;color:#333;">' + (b.match||'-') + '</td>'
+          + '<td style="padding:6px 4px;color:#333;">' + (b.market||'-') + '</td>'
+          + '<td style="padding:6px 4px;text-align:right;font-weight:600;color:' + resultColor + ';">' + (b.odds||'-') + 'x</td>'
+          + '</tr>';
+      }).join('')
+    + '</tbody></table></div>'
+    + (h.length > shown.length ? '<p style="font-size:10px;color:#999;margin-top:6px;">Mostrando las ' + LIMIT + ' mas recientes de ' + h.length + ' totales.</p>' : '');
 }
 
 
@@ -2366,6 +2404,7 @@ function renderHistory(){
   if (typeof window._historyDaysFilter === 'undefined') window._historyDaysFilter = null;
   const filteredHistory = getFilteredHistory(window._historyDaysFilter);
   renderSummaryTable(filteredHistory);
+  renderDetailTable(filteredHistory);
   const stats = getStats(filteredHistory);
   const mr = document.getElementById('history-stats');
   const filterBar = `<button onclick="restoreHistoryFromCloud()" style="width:100%;margin-bottom:8px;font-size:12px;padding:8px;border-radius:6px;cursor:pointer;border:1px solid #185FA5;background:#E6F1FB;color:#185FA5;">☁️ Restaurar historial completo desde la nube</button>
