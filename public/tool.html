@@ -1960,6 +1960,12 @@ function getClosingOddsForBet(market, closingLines, homeTeam, awayTeam) {
     if (awayTeam && teamName.includes((awayTeam.split(' ')[0]||'').toLowerCase())) return closingLines.h2h.away;
     return null;
   }
+  // MEJORA: "Ambos equipos marcan" ahora tambien autocompleta -- el proxy ya
+  // solicita el mercado 'btts' a The Odds API, antes solo se pedian h2h y
+  // totals asi que este mercado siempre caia a entrada manual.
+  if (mkt === 'ambos equipos marcan') {
+    return closingLines.btts ? closingLines.btts.yes : null;
+  }
   const num = (re) => { const mm = mkt.match(re); return mm ? parseFloat(mm[1]) : null; };
   let n;
   if ((n = num(/m[aá]s de ([\d.]+) goles/)) !== null) {
@@ -1970,7 +1976,7 @@ function getClosingOddsForBet(market, closingLines, homeTeam, awayTeam) {
     const row = (closingLines.totals || []).find(function(t){ return Math.abs(t.point - n) < 0.01; });
     return row ? row.under : null;
   }
-  return null; // corners/tarjetas/otros mercados -- sin soporte automatico todavia
+  return null; // corners/tarjetas/otros mercados -- sin soporte automatico todavia (The Odds API no los cubre de forma confiable)
 }
 
 // Wrapper usado desde Historial: la mayoria de apuestas tienen una
