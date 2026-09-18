@@ -552,15 +552,21 @@ async function saveBetToCloud(bet) {
     const { data: sessionData } = await _sb.auth.getSession();
     const token = sessionData?.session?.access_token;
     if (!token) return;
-    // Use fetch directly with auth header to avoid RLS issues
-    const res = await fetch(SUPABASE_URL + '/rest/v1/bets', {
+    // BUGFIX CRITICO: PostgREST (Supabase) NO reconoce un encabezado
+    // "On-Conflict" -- la forma correcta de indicar sobre que columnas
+    // resolver conflictos es el parametro de URL "on_conflict". El
+    // encabezado se ignoraba en silencio, asi que "resolution=ignore-
+    // duplicates" nunca tenia un objetivo real sobre el cual aplicarse --
+    // cualquier apuesta que ya existiera (ej. al presionar "Sincronizar",
+    // que recorre TODO el historial local) chocaba con un 409 real en vez
+    // de ignorarse.
+    const res = await fetch(SUPABASE_URL + '/rest/v1/bets?on_conflict=user_id,match,market', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         'apikey': SUPABASE_KEY,
         'Authorization': 'Bearer ' + token,
         'Prefer': 'return=minimal,resolution=ignore-duplicates',
-        'On-Conflict': 'user_id,match,market'
       },
       body: JSON.stringify({
         user_id: _sbUser.id,
@@ -4467,14 +4473,15 @@ async function syncEloToCloud(teamId, rating) {
     const { data: sessionData } = await _sb.auth.getSession();
     const token = sessionData?.session?.access_token;
     if (!token) return;
-    await fetch(SUPABASE_URL + '/rest/v1/elo_ratings', {
+    // BUGFIX: mismo problema que en saveBetToCloud -- "On-Conflict" como
+    // encabezado no lo reconoce PostgREST, va como parametro de URL.
+    await fetch(SUPABASE_URL + '/rest/v1/elo_ratings?on_conflict=user_id,team_id', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         'apikey': SUPABASE_KEY,
         'Authorization': 'Bearer ' + token,
         'Prefer': 'return=minimal,resolution=merge-duplicates',
-        'On-Conflict': 'user_id,team_id',
       },
       body: JSON.stringify({ user_id: _sbUser.id, team_id: teamId, rating: rating, updated_at: new Date().toISOString() }),
     });
