@@ -1525,7 +1525,21 @@ function buildPredPanel(m){
 
 function buildInjuriesPanel(m){
   const inj=m.injuries;if(!inj)return'';
-  const hI=inj.home||[],aI=inj.away||[];
+  // BUGFIX: la API a veces devuelve varias entradas para el MISMO jugador
+  // lesionado (ej. una por cada fecha futura donde sigue de baja) -- antes
+  // se contaban y mostraban todas sin filtrar, inflando "46 lesiones" cuando
+  // en realidad eran unos pocos jugadores distintos repetidos muchas veces.
+  // Ahora se deduplica por nombre de jugador antes de contar/mostrar.
+  const dedupe = arr => {
+    const seen = new Set();
+    return (arr||[]).filter(i => {
+      const key = (i.player||'').trim().toLowerCase();
+      if (!key || seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  };
+  const hI=dedupe(inj.home),aI=dedupe(inj.away);
   if(!hI.length&&!aI.length)return`<div style="background:#f0fff8;border:1px solid #b8e8d0;border-radius:8px;padding:8px 12px;margin-bottom:8px;font-size:12px;color:#0F6E56;">✓ Sin lesiones registradas</div>`;
   const chips=arr=>arr.map(i=>`<span class="injury-chip">🤕 ${i.player}</span>`).join('');
   return `<div style="background:#fff5f5;border:1px solid #f5c0c0;border-radius:8px;padding:10px 12px;margin-bottom:8px;">
@@ -1548,7 +1562,13 @@ function buildLineupsPanel(m){
 }
 
 function buildH2H(m){
-  const h2h=m.h2h;if(!h2h?.length)return`<div class="h2h-panel"><p class="section-label">H2H</p><div style="font-size:12px;color:#999;">Sin enfrentamientos previos</div></div>`;
+  const h2h=m.h2h;
+  if(!h2h?.length){
+    const msg = m.h2hFetchFailed
+      ? '⚠️ No se pudo cargar el historial (fallo de conexion/limite de la API) -- vuelve a analizar este partido para reintentar.'
+      : 'Sin enfrentamientos previos';
+    return `<div class="h2h-panel"><p class="section-label">H2H</p><div style="font-size:12px;color:${m.h2hFetchFailed?'#854F0B':'#999'};">${msg}</div></div>`;
+  }
   const hid=m.home.id;let hW=0,aW=0,dr=0,tG=0,btts=0;
   const rows=h2h.map(fix=>{
     const isHH=fix.teams.home.id===hid;const hg=fix.score.fulltime.home??0,ag=fix.score.fulltime.away??0;
@@ -3303,8 +3323,8 @@ async function runAnalysis(){
       home:hInj.status==='fulfilled'?hInj.value.injuries||[]:[],
       away:aInj.status==='fulfilled'?aInj.value.injuries||[]:[],
     };
-    if(h2dRaw.status==='fulfilled'){m.h2h=h2dRaw.value.response||[];m.h2hStats=parseH2HStats(h2dRaw.value,m.home.id);seedEloFromH2H(m.home.id,m.away.id,m.h2h);}
-    else{m.h2h=[];m.h2hStats=null;}
+    if(h2dRaw.status==='fulfilled'){m.h2h=h2dRaw.value.response||[];m.h2hStats=parseH2HStats(h2dRaw.value,m.home.id);seedEloFromH2H(m.home.id,m.away.id,m.h2h);m.h2hFetchFailed=false;}
+    else{m.h2h=[];m.h2hStats=null;m.h2hFetchFailed=true;}
     m.prediction=pred.status==='fulfilled'?pred.value:{found:false};
     m.importance = importance.status==='fulfilled' ? importance.value : null;
     m.homeFatigue = hFatigue.status==='fulfilled' ? hFatigue.value : null;
